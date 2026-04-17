@@ -1,7 +1,7 @@
 import os
 import re
 import json
-from datetime import datetime
+from datetime import datetime, time as dtime
 from langchain_openai import ChatOpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -338,6 +338,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {str(e)}")
 
+# ── Scheduled Monthly Report ──────────────────────────────────────────────────
+
+async def scheduled_monthly_report(context) -> None:
+    today = datetime.now()
+    if today.day != 1:
+        return
+
+    if today.month == 1:
+        month, year = 12, today.year - 1
+    else:
+        month, year = today.month - 1, today.year
+
+    try:
+        report = generate_monthly_report(month, year)
+        await context.bot.send_message(
+            chat_id=MANAGEMENT_GROUP_ID,
+            text=f"📅 *Rapport automatique du mois écoulé*\n\n{report}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Error sending scheduled report: {e}")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -345,6 +367,13 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("rapport", rapport_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Send monthly report on the 1st of each month at 08:00 UTC (09:00 Maroc)
+    app.job_queue.run_daily(
+        scheduled_monthly_report,
+        time=dtime(hour=8, minute=0)
+    )
+
     app.run_polling()
 
 if __name__ == "__main__":
