@@ -447,10 +447,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     extracted = result["extracted"]
-    PENDING[chat_id] = build_pending(extracted, "")
+    existing_file_url = PENDING.get(chat_id, {}).get("file_url", "")
+    PENDING[chat_id] = build_pending(extracted, existing_file_url)
 
     await update.message.reply_text(
-        format_expense_summary(extracted),
+        format_expense_summary(extracted, existing_file_url),
         parse_mode="Markdown"
     )
 
