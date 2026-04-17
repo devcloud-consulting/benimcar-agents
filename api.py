@@ -35,6 +35,20 @@ class GeneralExpense(BaseModel):
     file_url: str
     sheet_type: str = "general"
 
+def normalize_amount(value: str) -> float:
+    try:
+        return float(str(value).replace("dh", "").replace("MAD", "").strip())
+    except Exception:
+        return -1.0
+
+def normalize_date(value: str) -> str:
+    for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y"]:
+        try:
+            return datetime.strptime(value.strip(), fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return value.strip()
+
 def get_sheet(worksheet_name: str):
     creds = Credentials.from_service_account_file(
         "/root/google-service-account.json",
@@ -47,16 +61,14 @@ def check_duplicate_car(date: str, category: str, amount: str, car: str) -> bool
     try:
         sheet = get_sheet("Dépenses Voitures")
         rows = sheet.get_all_values()
-        try:
-            normalized_date = datetime.strptime(date, "%d/%m/%Y").strftime("%Y-%m-%d")
-        except ValueError:
-            normalized_date = date
+        norm_date = normalize_date(date)
+        norm_amount = normalize_amount(amount)
         for row in rows[1:]:
             if len(row) < 5:
                 continue
-            if (row[0].strip() == normalized_date and
+            if (normalize_date(row[0]) == norm_date and
                 row[1].strip() == category and
-                str(row[3]).strip() == str(amount) and
+                normalize_amount(row[3]) == norm_amount and
                 row[4].strip() == car):
                 return True
         return False
@@ -67,16 +79,14 @@ def check_duplicate_general(date: str, category: str, amount: str) -> bool:
     try:
         sheet = get_sheet("Dépense Général")
         rows = sheet.get_all_values()
-        try:
-            normalized_date = datetime.strptime(date, "%d/%m/%Y").strftime("%Y-%m-%d")
-        except ValueError:
-            normalized_date = date
+        norm_date = normalize_date(date)
+        norm_amount = normalize_amount(amount)
         for row in rows[1:]:
             if len(row) < 4:
                 continue
-            if (row[0].strip() == normalized_date and
+            if (normalize_date(row[0]) == norm_date and
                 row[1].strip() == category and
-                str(row[3]).strip() == str(amount)):
+                normalize_amount(row[3]) == norm_amount):
                 return True
         return False
     except Exception:
