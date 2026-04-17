@@ -16,8 +16,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-EUR_TO_MAD = 10.0
-
 FRENCH_MONTHS = {
     "janvier": 1, "février": 2, "fevrier": 2, "mars": 3,
     "avril": 4, "mai": 5, "juin": 6, "juillet": 7,
@@ -91,6 +89,7 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
             }
 
     # Fallback: calculate from Income sheet
+    # Vente (DH) column is always in dirhams — no currency conversion needed
     income_ws = wb.worksheet("Income")
     income_rows = income_ws.get_all_values()
     total_ventes = 0.0
@@ -103,15 +102,8 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
         d = parse_date(row[0])
         if not d or d.month != month or d.year != year:
             continue
-        currency = row[6].strip() if len(row) > 6 else "Dirham"
-        vente = parse_amount(row[5])
-        if currency.lower() == "euro":
-            vente *= EUR_TO_MAD
-        commission = parse_amount(row[7]) if len(row) > 7 else 0.0
-        if currency.lower() == "euro":
-            commission *= EUR_TO_MAD
-        total_ventes += vente
-        commissions += commission
+        total_ventes += parse_amount(row[5])
+        commissions += parse_amount(row[7]) if len(row) > 7 else 0.0
         try:
             jours_location += int(row[2])
         except Exception:
