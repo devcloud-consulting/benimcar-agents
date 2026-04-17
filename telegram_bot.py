@@ -167,14 +167,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await file.download_to_drive(tmp_path)
 
-# Upload to Google Drive
-    try:
-        filename = f"justificatif_{chat_id}_{int(time.time())}.jpg"
-        file_url = upload_image(tmp_path, filename)
-        print(f"DEBUG Drive upload success: {file_url}")
-    except Exception as e:
-        print(f"DEBUG Drive upload failed: {str(e)}")
-        file_url = ""
+    filename = f"justificatif_{chat_id}_{int(time.time())}.jpg"
+    file_url = ""
+
     # Analyze image with Gemini Vision
     try:
         import asyncio
@@ -187,7 +182,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 allowed_categories=config["allowed_categories"]
             )
         )
+        # Upload to Drive with date/category from extraction
+        extracted_preview = result.get("extracted") or {}
+        try:
+            file_url = upload_image(
+                tmp_path, filename,
+                extracted_preview.get("date"),
+                extracted_preview.get("categorie")
+            )
+        except Exception as e:
+            print(f"DEBUG Drive upload failed: {e}")
     except Exception as e:
+        # Gemini failed — upload to root folder as fallback
+        try:
+            file_url = upload_image(tmp_path, filename)
+        except Exception as ue:
+            print(f"DEBUG Drive upload failed: {ue}")
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
         PENDING[chat_id] = {"file_url": file_url, "waiting_description": True, "config": config}
