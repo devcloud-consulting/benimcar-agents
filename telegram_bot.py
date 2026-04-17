@@ -467,8 +467,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+async def debug_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    m = update.message
+    if m:
+        print(f"DEBUG_TOPIC chat_id={m.chat.id} thread_id={m.message_thread_id} text={str(m.text or '')[:50]}")
+
 def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.ALL, debug_all), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
