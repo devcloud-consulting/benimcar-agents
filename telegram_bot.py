@@ -16,7 +16,13 @@ BOT_TOKEN = "7733678538:AAFOmVlf9NAw2VFXeV1Tz7xOLD-qNoZHaPk"
 API_URL = "http://127.0.0.1:8000/add-expense"
 
 WORKERS_GROUP_ID = -5135022095
-MANAGEMENT_GROUP_ID = -5117263813
+COMPTA_GROUP_ID = -1003956789017
+COMPTA_DEPENSES_THREAD_ID = 6
+
+ALLOWED_CHAT_CONFIGS = {
+    WORKERS_GROUP_ID: {"thread_id": None, "allowed_categories": None},
+    COMPTA_GROUP_ID: {"thread_id": COMPTA_DEPENSES_THREAD_ID, "allowed_categories": None},
+}
 
 PENDING = {}
 
@@ -54,16 +60,25 @@ Envoie une photo avec ou sans légende.
 # ── Group Config ─────────────────────────────────────────────────────────────
 
 def get_group_config(chat_id: int) -> dict:
-    if chat_id == MANAGEMENT_GROUP_ID:
-        return {
-            "allowed_categories": ALL_CATEGORIES,
-            "help_text": HELP_GENERAL
-        }
-    else:
+    if chat_id == WORKERS_GROUP_ID:
         return {
             "allowed_categories": WORKERS_ALLOWED_CAR_CATEGORIES + WORKERS_ALLOWED_GENERAL_CATEGORIES,
             "help_text": HELP_CAR
         }
+    return {
+        "allowed_categories": ALL_CATEGORIES,
+        "help_text": HELP_GENERAL
+    }
+
+def is_allowed_chat(update) -> bool:
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id if update.message else None
+
+    if chat_id == WORKERS_GROUP_ID:
+        return True
+    if chat_id == COMPTA_GROUP_ID and thread_id == COMPTA_DEPENSES_THREAD_ID:
+        return True
+    return False
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +151,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.photo:
+        return
+    if not is_allowed_chat(update):
         return
 
     chat_id = update.effective_chat.id
@@ -260,6 +277,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
+        return
+    if not is_allowed_chat(update):
         return
 
     text = update.message.text.strip()
@@ -467,14 +486,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-async def debug_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    m = update.message
-    if m:
-        await m.reply_text(f"DEBUG\nchat_id: {m.chat.id}\nthread_id: {m.message_thread_id}\ntext: {str(m.text or '')[:40]}")
-
 def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, debug_all), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

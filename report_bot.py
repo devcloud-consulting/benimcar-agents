@@ -9,7 +9,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 BOT_TOKEN = "8664821276:AAH_riPofU3TtiAcoVlv5JKa_NRzUoPznaU"
-MANAGEMENT_GROUP_ID = -5117263813
+COMPTA_GROUP_ID = -1003956789017
+RAPPORTS_THREAD_ID = 14
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -259,8 +260,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def rapport_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    if update.effective_chat.type in ("group", "supergroup") and chat_id != MANAGEMENT_GROUP_ID:
-        return
+    thread_id = update.message.message_thread_id if update.message else None
+    if update.effective_chat.type in ("group", "supergroup"):
+        if chat_id != COMPTA_GROUP_ID or thread_id != RAPPORTS_THREAD_ID:
+            return
 
     args = " ".join(context.args) if context.args else ""
     if not args:
@@ -295,7 +298,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
 
     if update.effective_chat.type in ("group", "supergroup"):
-        if chat_id != MANAGEMENT_GROUP_ID:
+        thread_id = update.message.message_thread_id if update.message else None
+        if chat_id != COMPTA_GROUP_ID or thread_id != RAPPORTS_THREAD_ID:
             return
         bot_username = context.bot.username
         is_mention = f"@{bot_username}" in text
@@ -345,7 +349,8 @@ async def scheduled_monthly_report(context) -> None:
     try:
         report = generate_monthly_report(month, year)
         await context.bot.send_message(
-            chat_id=MANAGEMENT_GROUP_ID,
+            chat_id=COMPTA_GROUP_ID,
+            message_thread_id=RAPPORTS_THREAD_ID,
             text=f"📅 *Rapport automatique du mois écoulé*\n\n{report}",
             parse_mode="Markdown"
         )
