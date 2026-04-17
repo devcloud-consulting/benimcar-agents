@@ -470,7 +470,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def debug_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     m = update.message
     if m:
-        print(f"DEBUG_TOPIC chat_id={m.chat.id} thread_id={m.message_thread_id} text={str(m.text or '')[:50]}")
+        await m.reply_text(f"DEBUG\nchat_id: {m.chat.id}\nthread_id: {m.message_thread_id}\ntext: {str(m.text or '')[:40]}")
 
 def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
