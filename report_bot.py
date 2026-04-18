@@ -11,6 +11,7 @@ from google.oauth2.service_account import Credentials
 BOT_TOKEN = "8664821276:AAH_riPofU3TtiAcoVlv5JKa_NRzUoPznaU"
 COMPTA_GROUP_ID = -1003956789017
 RAPPORTS_THREAD_ID = 14
+CAISSES_THREAD_ID = 16
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -357,18 +358,67 @@ async def scheduled_monthly_report(context) -> None:
     except Exception as e:
         print(f"Error sending scheduled report: {e}")
 
+# ── Sync Handler ─────────────────────────────────────────────────────────────
+
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id if update.message else None
+    if update.effective_chat.type in ("group", "supergroup"):
+        if chat_id != COMPTA_GROUP_ID or thread_id != CAISSES_THREAD_ID:
+            return
+
+    await update.message.reply_text("⏳ Synchronisation Firestore en cours...")
+    try:
+        import asyncio
+        from sync_firestore import sync_bookings
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, sync_bookings)
+        await update.message.reply_text(
+            f"✅ *Synchronisation terminée*\n\n"
+            f"📥 Nouvelles réservations ajoutées : *{result['added']}*\n"
+            f"⏭️ Déjà existantes : *{result['skipped']}*\n"
+            f"📊 Total Firestore : *{result['total_firestore']}*",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur sync: {str(e)}")
+
+async def scheduled_sync(context) -> None:
+    try:
+        from sync_firestore import sync_bookings
+        result = sync_bookings()
+        if result["added"] > 0:
+            await context.bot.send_message(
+                chat_id=COMPTA_GROUP_ID,
+                message_thread_id=CAISSES_THREAD_ID,
+                text=(
+                    f"🔄 *Sync automatique Firestore*\n\n"
+                    f"📥 {result['added']} nouvelle(s) réservation(s) ajoutée(s) au tableau Income."
+                ),
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        print(f"Scheduled sync error: {e}")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("rapport", rapport_command))
+    app.add_handler(CommandHandler("sync", sync_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Send monthly report on the 1st of each month at 08:00 UTC (09:00 Maroc)
+    # Monthly report: 1st of each month at 08:00 UTC
     app.job_queue.run_daily(
         scheduled_monthly_report,
         time=dtime(hour=8, minute=0)
+    )
+
+    # Daily Firestore sync at 07:00 UTC
+    app.job_queue.run_daily(
+        scheduled_sync,
+        time=dtime(hour=7, minute=0)
     )
 
     app.run_polling()
