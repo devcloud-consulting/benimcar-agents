@@ -14,7 +14,7 @@ llm = ChatOpenAI(
 
 # ── Allowed Values ──────────────────────────────────────────────────────────
 ALLOWED_CAR_CATEGORIES = [
-    "Achat Voiture", "Maintenance", "Loyer", "Assurance",
+    "Achat Voiture", "Maintenance", "Assurance",
     "Fuel", "Vignette", "Péage/Parking", "Controle Technique"
 ]
 
@@ -37,7 +37,7 @@ ALLOWED_CARS = [
 ALLOWED_PAYMENTS = ["Transfer", "Card", "Cash", "Chèque"]
 
 WORKERS_ALLOWED_CAR_CATEGORIES = [
-    "Maintenance", "Loyer", "Assurance", "Fuel",
+    "Maintenance", "Assurance", "Fuel",
     "Vignette", "Péage/Parking", "Controle Technique"
 ]
 

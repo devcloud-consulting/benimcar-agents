@@ -12,6 +12,7 @@ BOT_TOKEN = "8664821276:AAH_riPofU3TtiAcoVlv5JKa_NRzUoPznaU"
 COMPTA_GROUP_ID = -1003956789017
 RAPPORTS_THREAD_ID = 14
 CAISSES_THREAD_ID = 16
+TACHES_THREAD_ID = 17
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -400,6 +401,112 @@ async def scheduled_sync(context) -> None:
     except Exception as e:
         print(f"Scheduled sync error: {e}")
 
+async def scheduled_payment_reminder(context) -> None:
+    """
+    Runs daily. On the 5th of each month, sends to Tâches channel a recap of all
+    bookings longer than 30 days whose payment status is not fully paid,
+    covering the period of the previous month (last 30 days of the booking window).
+    """
+    now = datetime.now()
+    if now.day != 5:
+        return
+
+    try:
+        creds = Credentials.from_service_account_file("/root/google-service-account.json", scopes=SCOPES)
+        client = gspread.authorize(creds)
+        sheet = client.open("Benim Car - Fiche Année 2025").worksheet("Income")
+        rows = sheet.get_all_values()
+
+        def parse_date(s):
+            for fmt in ["%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%B-%Y"]:
+                try:
+                    return datetime.strptime(s.strip(), fmt)
+                except Exception:
+                    pass
+            return None
+
+        def norm_amount(s):
+            try:
+                return float(str(s).replace(",", "").replace("dh", "").strip())
+            except Exception:
+                return 0.0
+
+        # Period: previous calendar month
+        if now.month == 1:
+            period_year, period_month = now.year - 1, 12
+        else:
+            period_year, period_month = now.year, now.month - 1
+
+        import calendar
+        period_start = datetime(period_year, period_month, 1)
+        period_end = datetime(period_year, period_month, calendar.monthrange(period_year, period_month)[1], 23, 59, 59)
+
+        pending = []
+        for row in rows[1:]:
+            if not any(row) or len(row) < 10:
+                continue
+            start_dt = parse_date(row[1]) if len(row) > 1 else None
+            end_dt = parse_date(row[2]) if len(row) > 2 else None
+            if not start_dt or not end_dt:
+                continue
+
+            # Only bookings longer than 30 days
+            total_days = (end_dt - start_dt).days
+            if total_days <= 30:
+                continue
+
+            # Booking must overlap with previous month window
+            if end_dt < period_start or start_dt > period_end:
+                continue
+
+            paid_status = row[9].strip().upper() if len(row) > 9 else ""
+            if paid_status == "OUI":
+                continue
+
+            amount = norm_amount(row[6]) if len(row) > 6 else 0
+            client_name = row[11].strip() if len(row) > 11 else ""
+            car = row[5].strip() if len(row) > 5 else ""
+            phone = row[12].strip() if len(row) > 12 else ""
+
+            pending.append({
+                "client": client_name or "Inconnu",
+                "car": car,
+                "start": row[1].strip(),
+                "end": row[2].strip(),
+                "days": total_days,
+                "amount": amount,
+                "paid": paid_status or "NON",
+                "phone": phone,
+            })
+
+        month_name = period_start.strftime("%B %Y")
+
+        if not pending:
+            msg = f"✅ *Rappel Paiements — {month_name}*\n\nAucun paiement en attente pour les réservations longues durée."
+        else:
+            lines = [f"⚠️ *Rappel Paiements — {month_name}*", f"_{len(pending)} réservation(s) longue durée à vérifier :_\n"]
+            for p in pending:
+                lines.append(
+                    f"👤 *{p['client']}*"
+                    + (f" — {p['phone']}" if p['phone'] else "")
+                )
+                lines.append(f"🚗 {p['car']}")
+                lines.append(f"📅 {p['start']} → {p['end']} ({p['days']} jours)")
+                lines.append(f"💰 {p['amount']:,.0f} DH — Payé: *{p['paid']}*")
+                lines.append("")
+            msg = "\n".join(lines)
+
+        await context.bot.send_message(
+            chat_id=COMPTA_GROUP_ID,
+            message_thread_id=TACHES_THREAD_ID,
+            text=msg,
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        print(f"Payment reminder error: {e}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -419,6 +526,12 @@ def main() -> None:
     app.job_queue.run_daily(
         scheduled_sync,
         time=dtime(hour=7, minute=0)
+    )
+
+    # Payment reminder: runs daily, fires on 5th of each month at 09:00 UTC
+    app.job_queue.run_daily(
+        scheduled_payment_reminder,
+        time=dtime(hour=9, minute=0)
     )
 
     app.run_polling()
