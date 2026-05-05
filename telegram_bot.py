@@ -10,7 +10,7 @@ from langgraph_workflow import (
     WORKERS_ALLOWED_CAR_CATEGORIES, WORKERS_ALLOWED_GENERAL_CATEGORIES,
     ALLOWED_PAYMENTS, ALL_CATEGORIES
 )
-from upload_to_drive import upload_image
+from upload_to_firebase import upload_image
 
 BOT_TOKEN = "7733678538:AAFOmVlf9NAw2VFXeV1Tz7xOLD-qNoZHaPk"
 API_URL = "http://127.0.0.1:8000/add-expense"
@@ -199,7 +199,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 allowed_categories=config["allowed_categories"]
             )
         )
-        # Upload to Drive with date/category from extraction
+        # Upload to Firebase Storage with date/category from extraction
         extracted_preview = result.get("extracted") or {}
         try:
             file_url = upload_image(
@@ -208,13 +208,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 extracted_preview.get("categorie")
             )
         except Exception as e:
-            print(f"DEBUG Drive upload failed: {e}")
+            print(f"DEBUG Storage upload failed: {e}")
     except Exception as e:
         # Gemini failed — upload to root folder as fallback
         try:
             file_url = upload_image(tmp_path, filename)
         except Exception as ue:
-            print(f"DEBUG Drive upload failed: {ue}")
+            print(f"DEBUG Storage upload failed: {ue}")
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
         PENDING[chat_id] = {"file_url": file_url, "waiting_description": True, "config": config}
