@@ -92,6 +92,10 @@ def check_duplicate_general(date: str, category: str, amount: str) -> bool:
     except Exception:
         return False
 
+def _s(v) -> str:
+    return "" if v is None else str(v)
+
+
 @app.post("/add-expense")
 def add_expense(expense: dict):
     print(f"DEBUG expense received: {expense}")
@@ -105,13 +109,13 @@ def add_expense(expense: dict):
             [
                 "/root/accounting-bot/add_expense.sh",
                 "car",
-                expense["date"],
-                expense["category"],
-                expense["details"],
-                expense["amount"],
-                expense["car"],
-                expense["payment_type"],
-                expense.get("file_url", ""),
+                _s(expense.get("date")),
+                _s(expense.get("category")),
+                _s(expense.get("details")),
+                _s(expense.get("amount")),
+                _s(expense.get("car")),
+                _s(expense.get("payment_type")),
+                _s(expense.get("file_url")),
             ],
             capture_output=True, text=True
         )
@@ -124,12 +128,12 @@ def add_expense(expense: dict):
             [
                 "/root/accounting-bot/add_expense.sh",
                 "general",
-                expense["date"],
-                expense["category"],
-                expense["details"],
-                expense["amount"],
-                expense["payment_type"],
-                expense.get("file_url", ""),
+                _s(expense.get("date")),
+                _s(expense.get("category")),
+                _s(expense.get("details")),
+                _s(expense.get("amount")),
+                _s(expense.get("payment_type")),
+                _s(expense.get("file_url")),
             ],
             capture_output=True, text=True
         )
