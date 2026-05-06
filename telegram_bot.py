@@ -510,7 +510,8 @@ async def _attach_to_guided(update, context, tg_file, mime, chat_id, pending):
     await _show_recap(update.message.reply_text, pending)
 
 
-async def _submit_pending(update, chat_id, pending):
+async def _submit_pending(reply_msg, chat_id, pending):
+    """reply_msg: a Telegram Message instance (use its .reply_text)."""
     expense = {
         "date": pending.get("date"),
         "category": pending.get("category"),
@@ -526,26 +527,26 @@ async def _submit_pending(update, chat_id, pending):
     try:
         response = requests.post(API_URL, json=expense, timeout=30)
     except requests.RequestException as e:
-        await update.message.reply_text(f"❌ Erreur de connexion: {str(e)}")
+        await reply_msg.reply_text(f"❌ Erreur de connexion: {str(e)}")
         return
     try:
         data = response.json()
     except ValueError:
         print(f"DEBUG API non-JSON (status={response.status_code}): {response.text[:500]}")
-        await update.message.reply_text(
+        await reply_msg.reply_text(
             f"❌ Erreur serveur (HTTP {response.status_code})."
         )
         return
 
     if response.status_code == 200 and data.get("success"):
         PENDING.pop(chat_id, None)
-        await update.message.reply_text("✅ Dépense enregistrée avec succès!")
+        await reply_msg.reply_text("✅ Dépense enregistrée avec succès!")
     elif data.get("duplicate"):
-        await update.message.reply_text(
+        await reply_msg.reply_text(
             "⚠️ Cette dépense existe déjà. Tape /annuler pour abandonner ou /depense pour recommencer."
         )
     else:
-        await update.message.reply_text(
+        await reply_msg.reply_text(
             f"❌ Erreur: {data.get('error', 'Erreur inconnue')}"
         )
 
@@ -933,6 +934,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import traceback
+    err = context.error
+    print(f"DEBUG handler error: {type(err).__name__}: {err}")
+    print("".join(traceback.format_exception(type(err), err, err.__traceback__)))
+
+
 def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -942,6 +950,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(on_error)
     app.run_polling()
 
 if __name__ == "__main__":
