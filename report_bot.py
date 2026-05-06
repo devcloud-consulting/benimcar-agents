@@ -91,8 +91,10 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
                 "moyenne_jour": row[4].strip() if len(row) > 4 else "",
             }
 
-    # Fallback: calculate from Income sheet
-    # Vente (DH) column is always in dirhams — no currency conversion needed
+    # Fallback: calculate from Income sheet.
+    # Income columns: 0:ID, 1:Allez, 2:Retour, 3:Jours, 4:Prix(DH), 5:Voiture,
+    # 6:Vente(DH), 7:Currency, 8:Commissions, 9:Payé, ...
+    # Vente (DH) is already in dirhams — no currency conversion needed.
     income_ws = wb.worksheet("Income")
     income_rows = income_ws.get_all_values()
     total_ventes = 0.0
@@ -100,15 +102,15 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
     jours_location = 0
 
     for row in income_rows[1:]:
-        if len(row) < 6:
+        if len(row) < 7:
             continue
-        d = parse_date(row[0])
+        d = parse_date(row[1])  # Allez (booking start)
         if not d or d.month != month or d.year != year:
             continue
-        total_ventes += parse_amount(row[5])
-        commissions += parse_amount(row[7]) if len(row) > 7 else 0.0
+        total_ventes += parse_amount(row[6])  # Vente (DH)
+        commissions += parse_amount(row[8]) if len(row) > 8 else 0.0
         try:
-            jours_location += int(row[2])
+            jours_location += int(row[3])  # Jours
         except Exception:
             pass
 
