@@ -39,6 +39,17 @@ def get_sheet(worksheet_name: str):
     client = gspread.authorize(creds)
     return client.open("Benim Car - Fiche Année 2025").worksheet(worksheet_name)
 
+
+def sort_by_date(sheet) -> None:
+    """Sorts the data range (everything below the header) by column A
+    ascending. Dates are stored as real Sheets date serials, so the sort
+    is numeric/chronological, not lexicographic."""
+    last_row = len(sheet.get_all_values())
+    if last_row <= 1:
+        return
+    end_col = gspread.utils.rowcol_to_a1(1, sheet.col_count).rstrip("0123456789")
+    sheet.sort((1, "asc"), range=f"A2:{end_col}{last_row}")
+
 def write_car_expense(date_raw, categorie, details, montant, voiture, paiement, lien):
     try:
         date = datetime.strptime(date_raw, "%d/%m/%Y").strftime("%Y-%m-%d")
@@ -55,6 +66,7 @@ def write_car_expense(date_raw, categorie, details, montant, voiture, paiement, 
     sheet = get_sheet("Dépenses Voitures")
     next_row = len(sheet.get_all_values()) + 1
     sheet.insert_rows([[date, categorie, details, montant, voiture, paiement, lien]], row=next_row)
+    sort_by_date(sheet)
     print("OK")
 
 def write_general_expense(date_raw, categorie, details, montant, paiement, lien):
@@ -71,6 +83,7 @@ def write_general_expense(date_raw, categorie, details, montant, paiement, lien)
     sheet = get_sheet("Dépense Général")
     next_row = len(sheet.get_all_values()) + 1
     sheet.insert_rows([[date, categorie, details, montant, paiement, lien]], row=next_row)
+    sort_by_date(sheet)
     print("OK")
 
 if __name__ == "__main__":
