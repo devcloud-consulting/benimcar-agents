@@ -55,23 +55,45 @@ class ExpenseState(TypedDict):
     errors: list[str]
     summary: Optional[str]
 
-# ── Image Analysis (Gemini Vision) ──────────────────────────────────────────
-def analyze_image(image_path: str) -> str:
+# ── Image / PDF Analysis (Gemini Vision) ────────────────────────────────────
+MIME_FROM_EXT = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".webp": "image/webp",
+    ".heic": "image/heic", ".heif": "image/heif",
+    ".pdf": "application/pdf",
+}
+
+
+def _guess_mime(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    return MIME_FROM_EXT.get(ext, "image/jpeg")
+
+
+def analyze_image(image_path: str, mime_type: str | None = None) -> str:
+    """Analyse a receipt (image or PDF) via Gemini and return a French summary."""
     from google import genai
     from google.genai import types
     import time
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    if mime_type is None:
+        mime_type = _guess_mime(image_path)
 
     MODELS_TO_TRY = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash-001",
-        "gemini-2.0-flash-lite-001",
         "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
     ]
 
     with open(image_path, "rb") as f:
-        image_data = f.read()
+        data = f.read()
+
+    prompt = (
+        "Tu es un assistant comptable. Analyse ce recu ou justificatif "
+        "(image ou PDF). Extrait toutes les informations visibles: montant total, "
+        "date, type de depense, mode de paiement, fournisseur. Reponds en francais "
+        "avec un resume court. Si tu ne vois pas clairement une information, dis-le."
+    )
 
     last_error = None
     for model in MODELS_TO_TRY:
@@ -81,14 +103,15 @@ def analyze_image(image_path: str) -> str:
                 response = client.models.generate_content(
                     model=model,
                     contents=[
-                        types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
-                        "Tu es un assistant comptable. Analyse cette image de recu ou justificatif. Extrait toutes les informations visibles: montant total, date, type de depense, mode de paiement. Reponds en francais avec un resume court. Si tu ne vois pas clairement une information, dis-le."
-                    ]
+                        types.Part.from_bytes(data=data, mime_type=mime_type),
+                        prompt,
+                    ],
                 )
                 return response.text
             except Exception as e:
                 last_error = e
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                msg = str(e)
+                if "503" in msg or "UNAVAILABLE" in msg:
                     time.sleep(5)
                     continue
                 break
@@ -241,10 +264,10 @@ def process_expense_message(user_message: str, allowed_categories: list = None) 
         "summary": None
     })
 
-def process_expense_image(image_path: str, extra_info: str = "", allowed_categories: list = None) -> dict:
+def process_expense_image(image_path: str, extra_info: str = "", allowed_categories: list = None, mime_type: str | None = None) -> dict:
     if allowed_categories is None:
         allowed_categories = ALLOWED_CAR_CATEGORIES
-    image_description = analyze_image(image_path)
+    image_description = analyze_image(image_path, mime_type=mime_type)
     combined = f"{image_description}\n{extra_info}".strip()
     return process_expense_message(combined, allowed_categories)
 
