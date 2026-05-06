@@ -661,6 +661,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
     if action == "conf" and param == "yes":
+        try:
+            await q.edit_message_text("⏳ Enregistrement en cours...")
+        except Exception:
+            pass
         await _submit_pending(q.message, chat_id, pending)
         return
 
