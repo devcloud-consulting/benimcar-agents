@@ -308,23 +308,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         try:
             response = requests.post(API_URL, json=expense, timeout=30)
-            data = response.json()
-            if response.status_code == 200 and data.get("success"):
-                PENDING.pop(chat_id, None)
-                await update.message.reply_text("✅ Dépense enregistrée avec succès!")
-            elif data.get("duplicate"):
-                await update.message.reply_text(
-                    "⚠️ *Dépense en double détectée!*\n"
-                    "Cette dépense existe déjà.\n\n"
-                    "Tapez *ANNULER* si c'est un doublon, ou corrigez les informations.",
-                    parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text(
-                    f"❌ Erreur: {data.get('error', 'Erreur inconnue')}"
-                )
-        except Exception as e:
+        except requests.RequestException as e:
             await update.message.reply_text(f"❌ Erreur de connexion: {str(e)}")
+            return
+
+        try:
+            data = response.json()
+        except ValueError:
+            print(f"DEBUG API non-JSON response (status={response.status_code}): {response.text[:500]}")
+            await update.message.reply_text(
+                f"❌ Erreur serveur (HTTP {response.status_code}). "
+                "Réessaie dans un instant ou contacte l'admin si ça persiste."
+            )
+            return
+
+        if response.status_code == 200 and data.get("success"):
+            PENDING.pop(chat_id, None)
+            await update.message.reply_text("✅ Dépense enregistrée avec succès!")
+        elif data.get("duplicate"):
+            await update.message.reply_text(
+                "⚠️ *Dépense en double détectée!*\n"
+                "Cette dépense existe déjà.\n\n"
+                "Tapez *ANNULER* si c'est un doublon, ou corrigez les informations.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Erreur: {data.get('error', 'Erreur inconnue')}"
+            )
         return
 
     # ── ANNULER ───────────────────────────────────────────────────────────────
@@ -446,6 +457,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             updated_pending = {}
 
         if updated_pending:
+            if updated_pending.get("amount") is not None:
+                updated_pending["amount"] = str(updated_pending["amount"])
             PENDING[chat_id] = updated_pending
             fake_extracted = {
                 "date": updated_pending.get("date"),
