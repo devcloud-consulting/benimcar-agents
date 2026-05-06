@@ -1,7 +1,9 @@
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
+
+SHEETS_EPOCH = datetime(1899, 12, 30)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -41,14 +43,46 @@ def get_sheet(worksheet_name: str):
 
 
 def sort_by_date(sheet) -> None:
-    """Sorts the data range (everything below the header) by column A
-    ascending. Dates are stored as real Sheets date serials, so the sort
-    is numeric/chronological, not lexicographic."""
+    """Defensive utility: sort everything below the header by column A
+    ascending. Not used in the normal write path — kept for one-off
+    cleanups or if the sheet is ever edited manually."""
     last_row = len(sheet.get_all_values())
     if last_row <= 1:
         return
     end_col = gspread.utils.rowcol_to_a1(1, sheet.col_count).rstrip("0123456789")
     sheet.sort((1, "asc"), range=f"A2:{end_col}{last_row}")
+
+
+def _cell_to_date(cell) -> datetime | None:
+    """Parse a column-A cell (Sheets serial int/float or string) to a
+    datetime. Returns None if unparseable."""
+    if cell == "" or cell is None:
+        return None
+    if isinstance(cell, (int, float)):
+        return SHEETS_EPOCH + timedelta(days=int(cell))
+    s = str(cell).strip()
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y", "%d-%B-%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def find_insert_row(sheet, new_date_iso: str) -> int:
+    """Returns the 1-based row index at which to insert a new dépense so
+    the sheet stays sorted by column A ascending. If no existing row has a
+    later date, returns the row after the last data row (i.e. append)."""
+    new_dt = datetime.strptime(new_date_iso, "%Y-%m-%d")
+    rows = sheet.get("A2:A", value_render_option="UNFORMATTED_VALUE")
+    for i, row in enumerate(rows, start=2):
+        cell = row[0] if row else None
+        cell_dt = _cell_to_date(cell)
+        if cell_dt is None:
+            continue
+        if cell_dt > new_dt:
+            return i
+    return len(rows) + 2
 
 def write_car_expense(date_raw, categorie, details, montant, voiture, paiement, lien):
     try:
@@ -64,9 +98,8 @@ def write_car_expense(date_raw, categorie, details, montant, voiture, paiement, 
         raise ValueError(f"Type de paiement non autorisé: {paiement}")
 
     sheet = get_sheet("Dépenses Voitures")
-    next_row = len(sheet.get_all_values()) + 1
-    sheet.insert_rows([[date, categorie, details, montant, voiture, paiement, lien]], row=next_row)
-    sort_by_date(sheet)
+    insert_at = find_insert_row(sheet, date)
+    sheet.insert_rows([[date, categorie, details, montant, voiture, paiement, lien]], row=insert_at)
     print("OK")
 
 def write_general_expense(date_raw, categorie, details, montant, paiement, lien):
@@ -81,9 +114,8 @@ def write_general_expense(date_raw, categorie, details, montant, paiement, lien)
         raise ValueError(f"Type de paiement non autorisé: {paiement}")
 
     sheet = get_sheet("Dépense Général")
-    next_row = len(sheet.get_all_values()) + 1
-    sheet.insert_rows([[date, categorie, details, montant, paiement, lien]], row=next_row)
-    sort_by_date(sheet)
+    insert_at = find_insert_row(sheet, date)
+    sheet.insert_rows([[date, categorie, details, montant, paiement, lien]], row=insert_at)
     print("OK")
 
 if __name__ == "__main__":
