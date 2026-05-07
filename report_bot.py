@@ -1,7 +1,8 @@
 import os
 import re
 import json
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
+from calendar import monthrange
 from langchain_openai import ChatOpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -91,12 +92,19 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
                 "moyenne_jour": row[4].strip() if len(row) > 4 else "",
             }
 
-    # Fallback: calculate from Income sheet.
-    # Income columns: 0:ID, 1:Allez, 2:Retour, 3:Jours, 4:Prix(DH), 5:Voiture,
-    # 6:Vente(DH), 7:Currency, 8:Commissions, 9:Payé, ...
-    # Vente (DH) is already in dirhams — no currency conversion needed.
+    # Fallback: calculate from Income sheet, prorated by day so a
+    # multi-month booking only contributes the days that fall inside the
+    # requested month.
+    #
+    # Income columns: 0:ID, 1:Allez, 2:Retour, 3:Jours, 4:Prix(DH),
+    # 5:Voiture, 6:Vente(DH), 7:Currency, 8:Commissions, 9:Payé, ...
+    # Vente (DH) and Prix(DH) are both in dirhams.
     income_ws = wb.worksheet("Income")
     income_rows = income_ws.get_all_values()
+
+    month_start = datetime(year, month, 1)
+    next_month_start = month_start + timedelta(days=monthrange(year, month)[1])
+
     total_ventes = 0.0
     commissions = 0.0
     jours_location = 0
@@ -104,15 +112,28 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
     for row in income_rows[1:]:
         if len(row) < 7:
             continue
-        d = parse_date(row[1])  # Allez (booking start)
-        if not d or d.month != month or d.year != year:
+        start = parse_date(row[1])
+        end = parse_date(row[2])
+        if not start or not end or end <= start:
             continue
-        total_ventes += parse_amount(row[6])  # Vente (DH)
-        commissions += parse_amount(row[8]) if len(row) > 8 else 0.0
-        try:
-            jours_location += int(row[3])  # Jours
-        except Exception:
-            pass
+        # Day-by-day overlap with the requested month (end is exclusive,
+        # matching the convention Jours = (Retour - Allez).days).
+        overlap_start = max(start, month_start)
+        overlap_end = min(end, next_month_start)
+        overlap_days = (overlap_end - overlap_start).days
+        if overlap_days <= 0:
+            continue
+
+        booking_days = (end - start).days
+        daily_rate = parse_amount(row[4]) if len(row) > 4 else 0.0
+        if daily_rate == 0 and booking_days > 0:
+            # Fallback: derive daily rate from total Vente.
+            daily_rate = parse_amount(row[6]) / booking_days
+
+        total_ventes += overlap_days * daily_rate
+        jours_location += overlap_days
+        if len(row) > 8 and booking_days > 0:
+            commissions += parse_amount(row[8]) * (overlap_days / booking_days)
 
     return {
         "total_ventes": total_ventes,
