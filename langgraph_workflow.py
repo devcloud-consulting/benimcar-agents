@@ -107,10 +107,14 @@ def analyze_image(image_path: str, mime_type: str | None = None) -> str:
                         prompt,
                     ],
                 )
-                return response.text
+                text = response.text or ""
+                print(f"DEBUG Gemini[{model}] mime={mime_type} bytes={len(data)} → {len(text)} chars")
+                print(f"DEBUG Gemini description: {text[:600]}")
+                return text
             except Exception as e:
                 last_error = e
                 msg = str(e)
+                print(f"DEBUG Gemini[{model}] attempt {attempt+1} failed: {msg[:200]}")
                 if "503" in msg or "UNAVAILABLE" in msg:
                     time.sleep(5)
                     continue
@@ -184,9 +188,11 @@ Regles IMPORTANTES:
 
     try:
         extracted = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        print(f"DEBUG DeepSeek JSON parse failed: {e}; raw={raw[:300]!r}")
         extracted = None
 
+    print(f"DEBUG DeepSeek extracted: {extracted}")
     return {**state, "extracted": extracted}
 
 # ── Node 2: Validate ────────────────────────────────────────────────────────
@@ -198,23 +204,30 @@ def validate_expense(state: ExpenseState) -> ExpenseState:
     if not data:
         return {**state, "errors": ["Impossible d'extraire les donnees du message."]}
 
+    # Fill non-essential defaults so they don't fail validation: an empty
+    # description and today's date are perfectly fine for a receipt photo.
     if not data.get("date"):
-        errors.append("Date manquante.")
+        data["date"] = datetime.today().strftime("%d/%m/%Y")
+    if not data.get("details"):
+        data["details"] = ""
+
+    # Only montant and categorie are truly essential — without them we
+    # cannot route the expense to the right sheet or write a row.
     if not data.get("montant"):
         errors.append("Montant manquant.")
-    if not data.get("details"):
-        errors.append("Details manquants.")
     if data.get("categorie") not in allowed_categories:
         errors.append(f"Catégorie invalide: '{data.get('categorie')}'.")
+
+    # type_paiement and voiture are handled in the follow-up "waiting_car"
+    # flow on the bot side, so they're flagged but routed there.
     if data.get("type_paiement") not in ALLOWED_PAYMENTS:
         errors.append(f"Type de paiement invalide. Valeurs: Transfer, Card, Cash, Chèque")
 
-    # Car is mandatory only for car categories
     if data.get("categorie") in ALLOWED_CAR_CATEGORIES:
         if data.get("voiture") not in ALLOWED_CARS:
             errors.append(f"Voiture invalide: '{data.get('voiture')}'.")
 
-    return {**state, "errors": errors}
+    return {**state, "extracted": data, "errors": errors}
 
 # ── Node 3: Summarize ───────────────────────────────────────────────────────
 def summarize_expense(state: ExpenseState) -> ExpenseState:
