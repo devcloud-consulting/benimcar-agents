@@ -321,14 +321,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     config = get_group_config(chat_id)
 
     pending = PENDING.get(chat_id)
-    in_attach_step = (
+    in_guided_attach = (
         pending and pending.get("flow") == "guided"
         and pending.get("step") == "attach_photo"
     )
+    in_img_extract = (
+        pending and pending.get("flow") == "img_extract"
+        and pending.get("step") == "awaiting_attachment"
+    )
+    bypass_mention = in_guided_attach or in_img_extract
 
     raw_caption = update.message.caption or ""
-    if in_attach_step:
-        caption = raw_caption  # bypass mention check during guided attach
+    if bypass_mention:
+        caption = raw_caption
     else:
         caption = _group_caption_check(update, context, raw_caption)
         if caption is None:
@@ -337,9 +342,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
 
-    if in_attach_step:
+    if in_guided_attach:
         await _attach_to_guided(update, context, file, "image/jpeg", chat_id, pending)
         return
+
+    if in_img_extract:
+        # Clear the awaiting-attachment marker; _process_attachment will
+        # set its own pending based on extraction outcome.
+        PENDING.pop(chat_id, None)
 
     await _process_attachment(update, context, file, "image/jpeg", caption, chat_id, config)
 
@@ -360,13 +370,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     config = get_group_config(chat_id)
 
     pending = PENDING.get(chat_id)
-    in_attach_step = (
+    in_guided_attach = (
         pending and pending.get("flow") == "guided"
         and pending.get("step") == "attach_photo"
     )
+    in_img_extract = (
+        pending and pending.get("flow") == "img_extract"
+        and pending.get("step") == "awaiting_attachment"
+    )
+    bypass_mention = in_guided_attach or in_img_extract
 
     raw_caption = update.message.caption or ""
-    if in_attach_step:
+    if bypass_mention:
         caption = raw_caption
     else:
         caption = _group_caption_check(update, context, raw_caption)
@@ -375,9 +390,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     file = await context.bot.get_file(doc.file_id)
 
-    if in_attach_step:
+    if in_guided_attach:
         await _attach_to_guided(update, context, file, mime, chat_id, pending)
         return
+
+    if in_img_extract:
+        PENDING.pop(chat_id, None)
 
     await _process_attachment(update, context, file, mime, caption, chat_id, config)
 
@@ -589,9 +607,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "flow":
         if param == "img":
-            PENDING.pop(chat_id, None)
+            # Park a pending state so the next photo/PDF in this chat is
+            # picked up without requiring an @mention or a reply — Telegram
+            # reply context is unreliable for documents and the user
+            # complained that PDFs sent here got silently ignored.
+            PENDING[chat_id] = {
+                "flow": "img_extract",
+                "step": "awaiting_attachment",
+                "config": config,
+            }
             await q.edit_message_text(
-                "📎 Envoie une *photo* ou un *PDF* du justificatif (en réponse à ce message).",
+                "📎 Envoie une *photo* ou un *PDF* du justificatif (juste après ce message).",
                 parse_mode="Markdown",
             )
             return
