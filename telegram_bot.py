@@ -228,12 +228,19 @@ async def _post_extraction_reply(update, chat_id, config, result, file_url):
     extracted = result.get("extracted") or {}
     errors = result.get("errors", [])
 
-    non_critical_errors = [
-        e for e in errors
-        if "Voiture" not in e and "Type de paiement" not in e
-    ]
+    # Hard failure: extraction itself broke or we couldn't read the
+    # amount. Anything else is a "follow-up question" situation, not a
+    # "give up and ask for free-text description" situation.
+    extraction_broken = (
+        not extracted
+        or not extracted.get("montant")
+        or any("Impossible d'extraire" in e for e in errors)
+        or any("Montant manquant" in e for e in errors)
+    )
 
-    if non_critical_errors:
+    print(f"DEBUG _post_extraction_reply errors={errors!r} extraction_broken={extraction_broken}")
+
+    if extraction_broken:
         PENDING[chat_id] = {"file_url": file_url, "waiting_description": True, "config": config}
         await update.message.reply_text(
             "⚠️ Je n'ai pas pu extraire toutes les informations essentielles du reçu.\n\n"
@@ -242,14 +249,26 @@ async def _post_extraction_reply(update, chat_id, config, result, file_url):
         return
 
     if errors:
+        # Extraction worked but at least one field needs the user's input
+        # (invalid category for the group, missing voiture, missing
+        # type_paiement). Reuse the waiting_car flow which routes the next
+        # text reply through extract_correction.
         PENDING[chat_id] = {
             "file_url": file_url,
             "waiting_car": True,
             "partial": extracted,
-            "config": config
+            "config": config,
         }
 
+        allowed = config.get("allowed_categories") or []
         missing_parts = []
+
+        if any("Catégorie" in e for e in errors):
+            cats = "\n".join(f"• {c}" for c in allowed)
+            missing_parts.append(
+                f"🏷️ *Catégorie '{extracted.get('categorie')}' non autorisée ici.*\n"
+                f"Réponds avec une catégorie parmi:\n{cats}"
+            )
         if extracted.get("categorie") in ALLOWED_CAR_CATEGORIES and not extracted.get("voiture"):
             missing_parts.append(f"🚗 *Pour quelle voiture?*\n{CARS_LIST}")
         if not extracted.get("type_paiement"):
