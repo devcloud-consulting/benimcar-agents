@@ -530,6 +530,277 @@ async def scheduled_payment_reminder(context) -> None:
         print(f"Payment reminder error: {e}")
 
 
+# ── Caisses: monthly bank statements + balance tracking ────────────────────
+
+CAISSES_CAPTION_RE = re.compile(
+    r"^\s*(officiel|black)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([\d\s.,]+)\s*$",
+    re.IGNORECASE,
+)
+RELEVES_SHEET = "Relevés"
+RELEVES_HEADER = ["Date Fin", "Compte", "Solde Fin (DH)", "Fichier", "Uploadé par", "Uploadé le"]
+
+
+def _in_caisses_thread(update) -> bool:
+    if not update.effective_chat or update.effective_chat.id != COMPTA_GROUP_ID:
+        return False
+    thread_id = update.message.message_thread_id if update.message else None
+    return thread_id == CAISSES_THREAD_ID
+
+
+def _ensure_releves_sheet(wb):
+    """Return the Relevés worksheet, creating it with a header on first call."""
+    try:
+        return wb.worksheet(RELEVES_SHEET)
+    except gspread.WorksheetNotFound:
+        ws = wb.add_worksheet(title=RELEVES_SHEET, rows=200, cols=len(RELEVES_HEADER))
+        ws.update(values=[RELEVES_HEADER], range_name="A1")
+        return ws
+
+
+def _last_day_of_month(year: int, month: int) -> datetime:
+    from calendar import monthrange
+    return datetime(year, month, monthrange(year, month)[1])
+
+
+def _normalize_to_month_end(date_str: str) -> tuple[datetime, str]:
+    """Caption gives a date like 30/04/2026. We normalize to the last day of
+    that month so re-uploads always overwrite the same Storage path
+    (releves/YYYY-MM/...). Returns (normalized_datetime, "YYYY-MM")."""
+    dt = datetime.strptime(date_str, "%d/%m/%Y")
+    ym = dt.strftime("%Y-%m")
+    return _last_day_of_month(dt.year, dt.month), ym
+
+
+async def handle_caisses_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pick up PDFs/images posted in the Caisses topic with a valid caption
+    and store them as the monthly bank statement."""
+    if not update.message:
+        return
+    if not _in_caisses_thread(update):
+        return
+
+    doc = update.message.document
+    photo = update.message.photo
+    if not doc and not photo:
+        return
+
+    caption = (update.message.caption or "").strip()
+    if not caption:
+        return  # no caption → not a relevé upload
+
+    m = CAISSES_CAPTION_RE.match(caption)
+    if not m:
+        await update.message.reply_text(
+            "ℹ️ Pour enregistrer un relevé, ajoute en légende :\n"
+            "`officiel JJ/MM/AAAA SOLDE`  ou  `black JJ/MM/AAAA SOLDE`\n"
+            "Ex : `officiel 30/04/2026 47300`",
+            parse_mode="Markdown",
+        )
+        return
+
+    compte = m.group(1).lower()
+    date_str = m.group(2)
+    solde_raw = m.group(3)
+
+    try:
+        end_date, ym = _normalize_to_month_end(date_str)
+    except ValueError:
+        await update.message.reply_text("⚠️ Date invalide. Format attendu : JJ/MM/AAAA.")
+        return
+
+    solde = parse_amount(solde_raw)
+    if solde <= 0:
+        await update.message.reply_text("⚠️ Solde invalide.")
+        return
+
+    if doc:
+        mime = (doc.mime_type or "").lower()
+        if mime != "application/pdf":
+            await update.message.reply_text("⚠️ Merci d'envoyer le relevé en PDF.")
+            return
+        tg_file = await context.bot.get_file(doc.file_id)
+        ext = ".pdf"
+    else:
+        tg_file = await context.bot.get_file(photo[-1].file_id)
+        ext = ".jpg"  # in theory PDF-only, but tolerate a photo of the statement
+
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False, dir="/tmp") as tmp:
+        tmp_path = tmp.name
+    try:
+        await tg_file.download_to_drive(tmp_path)
+        from upload_to_firebase import upload_releve
+        url = upload_releve(tmp_path, compte, ym)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    user = update.effective_user
+    user_label = (user.full_name if user else "?") or "?"
+    wb = get_workbook()
+    ws = _ensure_releves_sheet(wb)
+
+    rows = ws.get_all_values()
+    end_iso = end_date.strftime("%Y-%m-%d")
+    existing_row = None
+    for i, row in enumerate(rows[1:], start=2):
+        if len(row) >= 2 and row[0] == end_iso and row[1].lower() == compte:
+            existing_row = i
+            break
+
+    new_row = [
+        end_iso, compte, str(int(solde)) if solde.is_integer() else str(solde),
+        url, user_label, datetime.now().strftime("%Y-%m-%d %H:%M"),
+    ]
+    if existing_row:
+        ws.update(values=[new_row], range_name=f"A{existing_row}:F{existing_row}")
+        action = "remplacé"
+    else:
+        ws.append_row(new_row)
+        action = "enregistré"
+
+    await update.message.reply_text(
+        f"✅ Relevé *{compte}* {action} pour *{end_date.strftime('%B %Y')}*\n"
+        f"💰 Solde fin de mois : *{solde:,.0f} DH*\n"
+        f"📎 [Fichier]({url})",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+
+def _last_balance(ws, compte: str) -> tuple[datetime | None, float, str]:
+    """Returns (anchor_date, balance, file_url) for the most recent relevé
+    of the given account, or (None, 0, '') if none."""
+    rows = ws.get_all_values()
+    best_dt = None
+    best_solde = 0.0
+    best_url = ""
+    for row in rows[1:]:
+        if len(row) < 3 or row[1].lower() != compte:
+            continue
+        try:
+            dt = datetime.strptime(row[0], "%Y-%m-%d")
+        except ValueError:
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt = dt
+            best_solde = parse_amount(row[2])
+            best_url = row[3] if len(row) > 3 else ""
+    return best_dt, best_solde, best_url
+
+
+def _movements_since(wb, anchor: datetime) -> dict:
+    """Sum movements after the anchor date, split by payment-method bucket.
+    Returns {'officiel': delta, 'black': delta}.
+
+    Mapping:
+      Cash → black
+      Card / Transfer / Chèque → officiel
+    """
+    out = {"officiel": 0.0, "black": 0.0}
+
+    def bucket(method: str) -> str | None:
+        m = (method or "").strip().lower()
+        if m == "cash":
+            return "black"
+        if m in ("card", "transfer", "chèque", "cheque"):
+            return "officiel"
+        return None
+
+    # Income (encaissements) — only count fully paid bookings, otherwise we'd
+    # double-count partials. Vente (DH) is in column 6, payment in col 9 (Payé),
+    # but we don't have a method on Income; we approximate by saying Income
+    # encaissements always credit officiel unless the Notes say "cash".
+    # In practice the boss says everything Card/Transfer/Chèque maps to
+    # officiel; Income doesn't expose method directly, so we skip Income
+    # here and rely on Dépenses for now. Document this limitation.
+    # (Booking-level method tracking can be added later if needed.)
+
+    # Dépenses Voitures
+    try:
+        ws_v = wb.worksheet("Dépenses Voitures")
+        for r in ws_v.get_all_values()[1:]:
+            if len(r) < 6:
+                continue
+            d = parse_date(r[0])
+            if not d or d <= anchor:
+                continue
+            b = bucket(r[5])
+            if b:
+                out[b] -= parse_amount(r[3])
+    except gspread.WorksheetNotFound:
+        pass
+
+    # Dépense Général
+    try:
+        ws_g = wb.worksheet("Dépense Général")
+        for r in ws_g.get_all_values()[1:]:
+            if len(r) < 5:
+                continue
+            d = parse_date(r[0])
+            if not d or d <= anchor:
+                continue
+            b = bucket(r[4])
+            if b:
+                out[b] -= parse_amount(r[3])
+    except gspread.WorksheetNotFound:
+        pass
+
+    return out
+
+
+async def cmd_solde(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _in_caisses_thread(update):
+        return
+    wb = get_workbook()
+    ws = _ensure_releves_sheet(wb)
+
+    lines = ["💼 *Solde des comptes*\n"]
+    for compte, label in [("officiel", "Officiel"), ("black", "Black")]:
+        anchor, base, _ = _last_balance(ws, compte)
+        if anchor is None:
+            lines.append(f"*{label}* : pas encore de relevé enregistré.")
+            continue
+        movements = _movements_since(wb, anchor).get(compte, 0.0)
+        current = base + movements
+        lines.append(
+            f"*{label}* : {current:,.0f} DH\n"
+            f"  _Ancré au {anchor.strftime('%d/%m/%Y')} = {base:,.0f} DH_\n"
+            f"  _Mouvements depuis : {movements:+,.0f} DH_"
+        )
+    lines.append("\n_Mouvements pris en compte : dépenses uniquement (Cash→Black, Card/Transfer/Chèque→Officiel)._")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_releves(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _in_caisses_thread(update):
+        return
+    wb = get_workbook()
+    ws = _ensure_releves_sheet(wb)
+    rows = ws.get_all_values()
+    entries = []
+    for row in rows[1:]:
+        if len(row) < 4:
+            continue
+        try:
+            dt = datetime.strptime(row[0], "%Y-%m-%d")
+        except ValueError:
+            continue
+        entries.append((dt, row[1], parse_amount(row[2]), row[3]))
+    entries.sort(key=lambda e: (e[0], e[1]), reverse=True)
+    if not entries:
+        await update.message.reply_text("ℹ️ Aucun relevé enregistré pour l'instant.")
+        return
+    lines = ["📚 *Derniers relevés*\n"]
+    for dt, compte, solde, url in entries[:12]:
+        lines.append(
+            f"• {dt.strftime('%b %Y')} — *{compte}* — {solde:,.0f} DH — [PDF]({url})"
+        )
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True
+    )
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -537,6 +808,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("rapport", rapport_command))
     app.add_handler(CommandHandler("sync", sync_command))
+    app.add_handler(CommandHandler("solde", cmd_solde))
+    app.add_handler(CommandHandler("releves", cmd_releves))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_caisses_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Monthly report: 1st of each month at 08:00 UTC

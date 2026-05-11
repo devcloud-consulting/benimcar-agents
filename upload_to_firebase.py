@@ -51,6 +51,20 @@ def upload_image(file_path: str, filename: str,
     return blob.public_url
 
 
+def upload_releve(file_path: str, compte: str, year_month: str) -> str:
+    """Upload a monthly bank statement PDF.
+    Path: releves/YYYY-MM/{compte}.pdf — one file per (month, account),
+    so re-uploading replaces the existing entry."""
+    bucket = _get_bucket()
+    ext = os.path.splitext(file_path)[1] or ".pdf"
+    blob_path = f"releves/{year_month}/{compte.lower()}{ext}"
+    blob = bucket.blob(blob_path)
+    mime, _ = mimetypes.guess_type(file_path)
+    blob.upload_from_filename(file_path, content_type=mime or "application/pdf")
+    blob.make_public()
+    return blob.public_url
+
+
 if __name__ == "__main__":
     path = sys.argv[1]
     name = sys.argv[2]
