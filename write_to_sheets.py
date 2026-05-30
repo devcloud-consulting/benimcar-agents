@@ -1,9 +1,11 @@
+import re
 import sys
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 
 SHEETS_EPOCH = datetime(1899, 12, 30)
+_PLATE_RE = re.compile(r"\d{4,5}\s*-\s*[A-Za-z]\s*-\s*\d{1,2}")
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -32,6 +34,26 @@ ALLOWED_CARS = [
 ]
 
 ALLOWED_PAYMENT_TYPES = ["Transfer", "Card", "Cash", "Chèque"]
+
+
+def canonicalize_car(name) -> str | None:
+    """Map any string containing a fleet plate to its ALLOWED_CARS entry.
+    Duplicated here (rather than imported) so this module stays free of
+    langchain / langgraph deps — it's loaded via subprocess per write."""
+    if not name:
+        return None
+    if name in ALLOWED_CARS:
+        return name
+    s = str(name)
+    m = _PLATE_RE.search(s)
+    if not m:
+        return None
+    plate = re.sub(r"\s+", "", m.group(0)).upper()
+    for car in ALLOWED_CARS:
+        if re.sub(r"\s+", "", car).upper().endswith(plate):
+            return car
+    return None
+
 
 def get_sheet(worksheet_name: str):
     creds = Credentials.from_service_account_file(
@@ -92,6 +114,7 @@ def write_car_expense(date_raw, categorie, details, montant, voiture, paiement, 
 
     if categorie not in ALLOWED_CAR_CATEGORIES:
         raise ValueError(f"Catégorie non autorisée: {categorie}")
+    voiture = canonicalize_car(voiture) or voiture
     if voiture not in ALLOWED_CARS:
         raise ValueError(f"Voiture non autorisée: {voiture}")
     if paiement not in ALLOWED_PAYMENT_TYPES:
