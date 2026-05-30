@@ -47,6 +47,34 @@ WORKERS_ALLOWED_GENERAL_CATEGORIES = [
 
 ALL_CATEGORIES = ALLOWED_CAR_CATEGORIES + ALLOWED_GENERAL_CATEGORIES
 
+# ── Car name canonicalization ───────────────────────────────────────────────
+# ALLOWED_CARS uses inconsistent separators (" : ", " - ", " -") and LLMs
+# tend to normalize to the dominant " - " form. That breaks the exact-match
+# check downstream (e.g. "Sandero Noir - 57972-B-33" vs the canonical
+# "Sandero Noir : 57972-B-33"). License plates are unique across the fleet,
+# so we use them as the join key.
+import re as _re
+_PLATE_RE = _re.compile(r"\d{4,5}\s*-\s*[A-Za-z]\s*-\s*\d{1,2}")
+
+
+def canonicalize_car(name) -> str | None:
+    """Return the canonical ALLOWED_CARS entry for any string that contains
+    one of the fleet's license plates. Returns None if no plate matches."""
+    if not name:
+        return None
+    if name in ALLOWED_CARS:
+        return name
+    s = str(name)
+    m = _PLATE_RE.search(s)
+    if not m:
+        return None
+    plate = _re.sub(r"\s+", "", m.group(0)).upper()
+    for car in ALLOWED_CARS:
+        if _re.sub(r"\s+", "", car).upper().endswith(plate):
+            return car
+    return None
+
+
 # ── State ───────────────────────────────────────────────────────────────────
 class ExpenseState(TypedDict):
     user_message: str
@@ -211,6 +239,12 @@ def validate_expense(state: ExpenseState) -> ExpenseState:
     if not data.get("details"):
         data["details"] = ""
 
+    # Canonicalize voiture so a LLM-normalized "Sandero Noir - 57972-B-33"
+    # matches the canonical "Sandero Noir : 57972-B-33".
+    canon = canonicalize_car(data.get("voiture"))
+    if canon:
+        data["voiture"] = canon
+
     # Only montant and categorie are truly essential — without them we
     # cannot route the expense to the right sheet or write a row.
     if not data.get("montant"):
@@ -329,6 +363,11 @@ Si le message n'est pas une correction, retourne: {{}}
 
     if not corrections:
         return {}
+
+    if "car" in corrections:
+        canon = canonicalize_car(corrections["car"])
+        if canon:
+            corrections["car"] = canon
 
     updated = dict(current_expense)
     updated.update(corrections)
