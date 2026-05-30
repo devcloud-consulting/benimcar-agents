@@ -113,22 +113,38 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
         if len(row) < 7:
             continue
         start = parse_date(row[1])
-        end = parse_date(row[2])
-        if not start or not end or end <= start:
+        if not start:
             continue
-        # Day-by-day overlap with the requested month (end is exclusive,
-        # matching the convention Jours = (Retour - Allez).days).
+        end = parse_date(row[2])
+
+        # Open-ended bookings (no Retour yet): treat as ongoing through
+        # the end of the requested month so they contribute their days.
+        effective_end = end if (end and end > start) else next_month_start
+
         overlap_start = max(start, month_start)
-        overlap_end = min(end, next_month_start)
+        overlap_end = min(effective_end, next_month_start)
         overlap_days = (overlap_end - overlap_start).days
         if overlap_days <= 0:
             continue
 
-        booking_days = (end - start).days
-        daily_rate = parse_amount(row[4]) if len(row) > 4 else 0.0
-        if daily_rate == 0 and booking_days > 0:
-            # Fallback: derive daily rate from total Vente.
-            daily_rate = parse_amount(row[6]) / booking_days
+        # Booking total days: prefer the declared Jours column (col 3),
+        # fall back to (end - start).days when the dates are present.
+        try:
+            declared_days = int(str(row[3]).strip()) if len(row) > 3 and str(row[3]).strip() else 0
+        except ValueError:
+            declared_days = 0
+        derived_days = (end - start).days if (end and end > start) else 0
+        booking_days = declared_days or derived_days
+
+        # Daily rate: prefer Vente(DH) / booking_days (matches how the
+        # row was priced). Only fall back to Prix(DH) if the division
+        # would be invalid (open booking with no declared Jours, or
+        # missing Vente).
+        vente = parse_amount(row[6]) if len(row) > 6 else 0.0
+        if booking_days > 0 and vente > 0:
+            daily_rate = vente / booking_days
+        else:
+            daily_rate = parse_amount(row[4]) if len(row) > 4 else 0.0
 
         total_ventes += overlap_days * daily_rate
         jours_location += overlap_days
