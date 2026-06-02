@@ -264,6 +264,31 @@ def sync_bookings() -> dict:
     if batch_updates:
         sheet.batch_update(batch_updates, value_input_option="USER_ENTERED")
 
+    # --- Remove orphans: rows with a Firestore ID that is no longer in
+    # the active set (booking was deleted or marked cancelled in the app).
+    # Manual rows (no ID) are left alone — those pre-date sync and are
+    # treated as authoritative historical data.
+    active_ids = {b.get("id") for b in all_bookings if b.get("id")}
+    orphan_row_nums = []
+    for i, row in enumerate(data_rows):
+        bid = row[COL_ID].strip() if len(row) > COL_ID and row[COL_ID] else ""
+        if bid and bid not in active_ids:
+            orphan_row_nums.append(i + 2)  # 1-indexed + header
+
+    deleted = 0
+    if orphan_row_nums:
+        delete_requests = [
+            {"deleteDimension": {"range": {
+                "sheetId": sheet.id,
+                "dimension": "ROWS",
+                "startIndex": r - 1,
+                "endIndex": r,
+            }}}
+            for r in sorted(orphan_row_nums, reverse=True)
+        ]
+        sheet.spreadsheet.batch_update({"requests": delete_requests})
+        deleted = len(orphan_row_nums)
+
     # --- Append all new rows at once, then re-sort in place ---
     if rows_to_insert:
         rows_to_insert.sort(key=lambda x: x[0])
@@ -290,6 +315,7 @@ def sync_bookings() -> dict:
     return {
         "added": added,
         "updated": updated,
+        "deleted": deleted,
         "skipped": skipped,
         "total_firestore": len(all_bookings),
     }
@@ -299,5 +325,6 @@ if __name__ == "__main__":
     result = sync_bookings()
     print(
         f"Sync complete: {result['added']} added, {result['updated']} updated, "
-        f"{result['skipped']} skipped ({result['total_firestore']} total in Firestore)"
+        f"{result.get('deleted', 0)} deleted, {result['skipped']} skipped "
+        f"({result['total_firestore']} total in Firestore)"
     )

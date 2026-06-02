@@ -415,9 +415,10 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         result = await loop.run_in_executor(None, sync_bookings)
         await update.message.reply_text(
             f"✅ *Synchronisation terminée*\n\n"
-            f"📥 Nouvelles réservations ajoutées : *{result['added']}*\n"
-            f"⏭️ Déjà existantes : *{result['skipped']}*\n"
-            f"📊 Total Firestore : *{result['total_firestore']}*",
+            f"📥 Added: *{result['added']}*\n"
+            f"🔄 Updated: *{result.get('updated', 0)}*\n"
+            f"🗑️ Deleted (orphans): *{result.get('deleted', 0)}*\n"
+            f"📊 Total Firestore: *{result['total_firestore']}*",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -427,14 +428,18 @@ async def scheduled_sync(context) -> None:
     try:
         from sync_firestore import sync_bookings
         result = sync_bookings()
-        if result["added"] > 0:
+        if result["added"] > 0 or result.get("deleted", 0) > 0:
+            parts = []
+            if result["added"]:
+                parts.append(f"📥 {result['added']} added")
+            if result.get("updated"):
+                parts.append(f"🔄 {result['updated']} updated")
+            if result.get("deleted"):
+                parts.append(f"🗑️ {result['deleted']} deleted (orphans)")
             await context.bot.send_message(
                 chat_id=COMPTA_GROUP_ID,
                 message_thread_id=CAISSES_THREAD_ID,
-                text=(
-                    f"🔄 *Sync automatique Firestore*\n\n"
-                    f"📥 {result['added']} nouvelle(s) réservation(s) ajoutée(s) au tableau Income."
-                ),
+                text=f"🔄 *Sync automatique Firestore*\n\n" + ", ".join(parts),
                 parse_mode="Markdown"
             )
     except Exception as e:
