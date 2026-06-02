@@ -34,8 +34,8 @@ MONTH_NAMES_FR = {
 }
 
 # Amortization & occupancy parameters
-AMORTIZATION_ANNUAL_RATE = 0.20         # 20% per year, linear, 5 years (60 months)
-AMORTIZATION_MONTHS = 60
+AMORTIZATION_TOTAL_RATE = 0.20          # 20% of vehicle value spread over the whole window
+AMORTIZATION_MONTHS = 60                # 5 years
 LONG_TERM_THRESHOLD_DAYS = 30           # bookings >= this are "long-term"
 LONG_TERM_DISCOUNT_FACTOR = 0.70        # long-term days count as 70%
 
@@ -179,7 +179,8 @@ def compute_amortization(purchases, year: int, month: int) -> tuple[float, int]:
         # months elapsed since purchase, inclusive of purchase month
         months_elapsed = (me.year - purchase_date.year) * 12 + (me.month - purchase_date.month) + 1
         if 1 <= months_elapsed <= AMORTIZATION_MONTHS:
-            total += price * AMORTIZATION_ANNUAL_RATE / 12
+            # Total amortization = price × 20% spread over 60 months
+            total += price * AMORTIZATION_TOTAL_RATE / AMORTIZATION_MONTHS
             active += 1
         elif months_elapsed > AMORTIZATION_MONTHS:
             active += 1  # car still owned, just fully amortized
@@ -323,7 +324,7 @@ def generate_period_report(start: tuple[int, int], end: tuple[int, int]) -> str:
     lines.append("💸 *Dépenses*")
     lines.append(f"  Voitures           : {t['car_exp']:,.0f} DH")
     lines.append(f"  Générales          : {t['general_exp']:,.0f} DH")
-    lines.append(f"  Amortissement      : {t['amortization']:,.0f} DH  _(20%/an × 5 ans)_")
+    lines.append(f"  Amortissement      : {t['amortization']:,.0f} DH  _(20% total sur 5 ans)_")
     total_costs = t["car_exp"] + t["general_exp"] + t["amortization"]
     lines.append(f"  *Total dépenses*    : *{total_costs:,.0f} DH*")
     lines.append("")
