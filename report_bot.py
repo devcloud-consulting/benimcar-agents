@@ -33,6 +33,12 @@ MONTH_NAMES_FR = {
     9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre"
 }
 
+# Amortization & occupancy parameters
+AMORTIZATION_ANNUAL_RATE = 0.20         # 20% per year, linear, 5 years (60 months)
+AMORTIZATION_MONTHS = 60
+LONG_TERM_THRESHOLD_DAYS = 30           # bookings >= this are "long-term"
+LONG_TERM_DISCOUNT_FACTOR = 0.70        # long-term days count as 70%
+
 llm = ChatOpenAI(
     model="deepseek-chat",
     api_key=os.getenv("DEEPSEEK_API_KEY"),
@@ -71,6 +77,292 @@ def parse_month_input(text: str) -> tuple[int, int] | None:
         if name in text:
             return (num, year)
     return None
+
+
+def parse_period_input(text: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Parse user input into a (start_year, start_month) → (end_year, end_month)
+    range. Supports:
+      "avril"                          → April current year, single month
+      "avril 2026"                     → April 2026, single month
+      "avril mai 2026"                 → April-May 2026
+      "avril à juin 2026", "avril-juin"→ April-June 2026
+      "2025"                           → entire year 2025
+      "3 derniers mois"                → last 3 months from today
+    Returns None if nothing matches."""
+    t = text.lower().strip()
+    # Year-only ("2025", "2026")
+    year_only = re.fullmatch(r"\s*(202\d)\s*", t)
+    if year_only:
+        y = int(year_only.group(1))
+        return ((y, 1), (y, 12))
+
+    # "N derniers mois" / "last N months"
+    last_n = re.search(r"(\d+)\s*derniers?\s*mois", t)
+    if last_n:
+        n = max(1, min(24, int(last_n.group(1))))
+        today = datetime.now()
+        end_m, end_y = today.month, today.year
+        start_dt = datetime(end_y, end_m, 1)
+        for _ in range(n - 1):
+            start_dt = (start_dt - timedelta(days=1)).replace(day=1)
+        return ((start_dt.year, start_dt.month), (end_y, end_m))
+
+    # Find ALL months mentioned, in order
+    months_found: list[tuple[int, int]] = []  # (position, month_num)
+    for name, num in FRENCH_MONTHS.items():
+        for m in re.finditer(rf"\b{name}\b", t):
+            months_found.append((m.start(), num))
+    months_found.sort()
+    if not months_found:
+        return None
+
+    year_match = re.search(r"\b(202\d)\b", t)
+    year = int(year_match.group(1)) if year_match else datetime.now().year
+
+    if len(months_found) == 1:
+        m = months_found[0][1]
+        return ((year, m), (year, m))
+
+    # Two or more months → first is start, last is end. If start > end (months
+    # span a year boundary like "decembre 2025 mars 2026") and an explicit year
+    # is given, assume the start belongs to the previous year.
+    start_m = months_found[0][1]
+    end_m = months_found[-1][1]
+    start_y = year
+    if start_m > end_m and year_match:
+        start_y = year - 1
+    return ((start_y, start_m), (year, end_m))
+
+
+def iter_months(start: tuple[int, int], end: tuple[int, int]):
+    sy, sm = start
+    ey, em = end
+    cur_y, cur_m = sy, sm
+    while (cur_y, cur_m) <= (ey, em):
+        yield cur_y, cur_m
+        cur_m += 1
+        if cur_m == 13:
+            cur_m, cur_y = 1, cur_y + 1
+
+
+def get_vehicle_purchases(wb) -> list[tuple[datetime, float]]:
+    """Returns [(date_achat, prix_dh), ...] from Dépenses Voitures."""
+    out = []
+    try:
+        ws = wb.worksheet("Dépenses Voitures")
+    except gspread.WorksheetNotFound:
+        return out
+    for r in ws.get_all_values()[1:]:
+        if len(r) < 5 or r[1].strip() != "Achat Voiture":
+            continue
+        d = parse_date(r[0])
+        if not d:
+            continue
+        try:
+            amt = parse_amount(r[3])
+        except Exception:
+            amt = 0.0
+        if amt > 0:
+            out.append((d, amt))
+    return out
+
+
+def compute_amortization(purchases, year: int, month: int) -> tuple[float, int]:
+    """Return (monthly_amortization, active_cars) for the given month.
+    A car is amortized from its purchase month inclusive over AMORTIZATION_MONTHS.
+    """
+    from calendar import monthrange
+    me = datetime(year, month, monthrange(year, month)[1])
+    total = 0.0
+    active = 0
+    for purchase_date, price in purchases:
+        # months elapsed since purchase, inclusive of purchase month
+        months_elapsed = (me.year - purchase_date.year) * 12 + (me.month - purchase_date.month) + 1
+        if 1 <= months_elapsed <= AMORTIZATION_MONTHS:
+            total += price * AMORTIZATION_ANNUAL_RATE / 12
+            active += 1
+        elif months_elapsed > AMORTIZATION_MONTHS:
+            active += 1  # car still owned, just fully amortized
+        # else: not yet purchased → ignore
+    return total, active
+
+
+def compute_occupancy(wb, year: int, month: int, purchases) -> dict:
+    """Compute raw + capped + weighted occupancy for one month.
+    Returns dict with raw_days, capped_days, weighted_days, capacity, suspects."""
+    from calendar import monthrange
+    ms = datetime(year, month, 1)
+    nd = monthrange(year, month)[1]
+    nms = ms + timedelta(days=nd)
+
+    try:
+        inc = wb.worksheet("Income").get_all_values()
+    except gspread.WorksheetNotFound:
+        return {"raw_days": 0, "capped_days": 0, "weighted_days": 0.0,
+                "capacity": 0, "suspects": [], "n_cars": 0}
+
+    per_car_days = {}
+    per_car_weighted = {}
+    for r in inc[1:]:
+        if len(r) < 7:
+            continue
+        s = parse_date(r[1])
+        if not s:
+            continue
+        e = parse_date(r[2])
+        eff = e if (e and e > s) else nms
+        o_s = max(s, ms)
+        o_e = min(eff, nms)
+        od = (o_e - o_s).days
+        if od <= 0:
+            continue
+        try:
+            booking_total = int(r[3].strip())
+        except Exception:
+            booking_total = (eff - s).days
+        factor = LONG_TERM_DISCOUNT_FACTOR if booking_total >= LONG_TERM_THRESHOLD_DAYS else 1.0
+        car = (r[5] or "").strip()
+        per_car_days[car] = per_car_days.get(car, 0) + od
+        per_car_weighted[car] = per_car_weighted.get(car, 0.0) + od * factor
+
+    # Active cars = purchased on or before month end
+    me = datetime(year, month, nd)
+    n_cars = sum(1 for d, _ in purchases if d <= me)
+    capacity = n_cars * nd
+
+    raw = sum(per_car_days.values())
+    capped = sum(min(v, nd) for v in per_car_days.values())
+    weighted = sum(min(v, nd * LONG_TERM_DISCOUNT_FACTOR) if v > nd else v
+                   for v in per_car_weighted.values())
+    # ^ for capped weighted: a single car can't physically exceed nd*1.0 raw,
+    # so its weighted contribution caps at nd * factor at worst.
+
+    suspects = [(c, v) for c, v in per_car_days.items() if v > nd]
+
+    return {
+        "raw_days": raw,
+        "capped_days": capped,
+        "weighted_days": weighted,
+        "capacity": capacity,
+        "suspects": suspects,
+        "n_cars": n_cars,
+    }
+
+
+def compute_period_stats(wb, start: tuple[int, int], end: tuple[int, int]) -> dict:
+    """Aggregates monthly stats over an inclusive (start_year, start_month) →
+    (end_year, end_month) range. Returns dict with totals + per-month rows."""
+    purchases = get_vehicle_purchases(wb)
+    rows = []
+    for y, m in iter_months(start, end):
+        rev = get_monthly_revenue(wb, m, y)
+        car_exp = sum(get_monthly_car_expenses(wb, m, y).values())
+        gen_exp = sum(get_monthly_general_expenses(wb, m, y).values())
+        amort, _ = compute_amortization(purchases, y, m)
+        occ = compute_occupancy(wb, y, m, purchases)
+        net_rev = rev["total_ventes"] - rev["commissions"]
+        benefit = net_rev - car_exp - gen_exp - amort
+        rows.append({
+            "year": y, "month": m,
+            "revenue": rev["total_ventes"],
+            "commissions": rev["commissions"],
+            "net_revenue": net_rev,
+            "car_exp": car_exp,
+            "general_exp": gen_exp,
+            "amortization": amort,
+            "benefit": benefit,
+            "occ_capped": occ["capped_days"] / occ["capacity"] * 100 if occ["capacity"] else 0,
+            "occ_weighted": occ["weighted_days"] / occ["capacity"] * 100 if occ["capacity"] else 0,
+            "rented_days": occ["capped_days"],
+            "capacity": occ["capacity"],
+            "n_cars": occ["n_cars"],
+            "suspects": occ["suspects"],
+        })
+
+    totals = {
+        "revenue": sum(r["revenue"] for r in rows),
+        "commissions": sum(r["commissions"] for r in rows),
+        "net_revenue": sum(r["net_revenue"] for r in rows),
+        "car_exp": sum(r["car_exp"] for r in rows),
+        "general_exp": sum(r["general_exp"] for r in rows),
+        "amortization": sum(r["amortization"] for r in rows),
+        "benefit": sum(r["benefit"] for r in rows),
+        "rented_days": sum(r["rented_days"] for r in rows),
+        "capacity": sum(r["capacity"] for r in rows),
+        "weighted_days": sum(r["occ_weighted"] / 100 * r["capacity"] for r in rows),
+    }
+    totals["occ_capped"] = totals["rented_days"] / totals["capacity"] * 100 if totals["capacity"] else 0
+    totals["occ_weighted"] = totals["weighted_days"] / totals["capacity"] * 100 if totals["capacity"] else 0
+
+    return {"rows": rows, "totals": totals}
+
+
+def generate_period_report(start: tuple[int, int], end: tuple[int, int]) -> str:
+    """Single multi-month report (or single month if start == end)."""
+    wb = get_workbook()
+    stats = compute_period_stats(wb, start, end)
+    rows = stats["rows"]
+    t = stats["totals"]
+
+    def label(y, m):
+        return f"{MONTH_NAMES_FR[m]} {y}"
+
+    if start == end:
+        header = f"📊 *Rapport — {label(*start)}*"
+    else:
+        n = len(rows)
+        header = f"📊 *Rapport — {label(*start)} → {label(*end)}* ({n} mois)"
+
+    lines = [header, ""]
+    lines.append("💰 *Revenus*")
+    lines.append(f"  Chiffre d'affaires : *{t['revenue']:,.0f} DH*")
+    if t["commissions"]:
+        lines.append(f"  Commissions        : −{t['commissions']:,.0f} DH")
+        lines.append(f"  Net revenus        : *{t['net_revenue']:,.0f} DH*")
+    lines.append("")
+    lines.append("💸 *Dépenses*")
+    lines.append(f"  Voitures           : {t['car_exp']:,.0f} DH")
+    lines.append(f"  Générales          : {t['general_exp']:,.0f} DH")
+    lines.append(f"  Amortissement      : {t['amortization']:,.0f} DH  _(20%/an × 5 ans)_")
+    total_costs = t["car_exp"] + t["general_exp"] + t["amortization"]
+    lines.append(f"  *Total dépenses*    : *{total_costs:,.0f} DH*")
+    lines.append("")
+    lines.append(f"✅ *Bénéfice net : {t['benefit']:,.0f} DH*")
+    lines.append("")
+    lines.append("📈 *Occupation*")
+    lines.append(f"  Brute (cappée)   : *{t['occ_capped']:.1f}%*  ({t['rented_days']}/{t['capacity']} j)")
+    lines.append(f"  Pondérée long-terme : *{t['occ_weighted']:.1f}%*  _(long-term ≥ {LONG_TERM_THRESHOLD_DAYS}j × {int(LONG_TERM_DISCOUNT_FACTOR*100)}%)_")
+
+    if len(rows) > 1:
+        lines.append("")
+        lines.append("*Détail mensuel :*")
+        for r in rows:
+            lines.append(
+                f"  {MONTH_NAMES_FR[r['month']][:3]} {r['year']}  "
+                f"Rev {r['net_revenue']:>8,.0f}  "
+                f"Dép {r['car_exp']+r['general_exp']+r['amortization']:>8,.0f}  "
+                f"Bén {r['benefit']:>+9,.0f}  "
+                f"Occ {r['occ_capped']:>4.0f}%/{r['occ_weighted']:.0f}%"
+            )
+
+    # Surface over-booking suspects
+    all_suspects = []
+    for r in rows:
+        for car, days in r["suspects"]:
+            all_suspects.append((r["year"], r["month"], car, days))
+    if all_suspects:
+        lines.append("")
+        lines.append("⚠️ *Sur-bookings détectés (à vérifier dans Firestore)* :")
+        for y, m, car, d in all_suspects[:6]:
+            short = car.split("(")[0].strip() or car
+            lines.append(f"  {MONTH_NAMES_FR[m][:3]} {y}: {short} {d}j (max {monthrange_days(y, m)})")
+
+    return "\n".join(lines)
+
+
+def monthrange_days(year: int, month: int) -> int:
+    from calendar import monthrange
+    return monthrange(year, month)[1]
 
 # ── Data Fetchers ─────────────────────────────────────────────────────────────
 
@@ -314,19 +606,24 @@ async def rapport_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    parsed = parse_month_input(args)
+    parsed = parse_period_input(args)
     if not parsed:
         await update.message.reply_text(
-            "❌ Mois non reconnu. Exemple: `/rapport juin 2025`",
+            "❌ Période non reconnue. Exemples :\n"
+            "  `/rapport juin 2025`\n"
+            "  `/rapport avril mai 2026`\n"
+            "  `/rapport avril à juin 2026`\n"
+            "  `/rapport 2025`\n"
+            "  `/rapport 3 derniers mois`",
             parse_mode="Markdown"
         )
         return
 
-    month, year = parsed
+    start, end = parsed
     await update.message.reply_text("⏳ Génération du rapport...")
 
     try:
-        report = generate_monthly_report(month, year)
+        report = generate_period_report(start, end)
         await update.message.reply_text(report, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {str(e)}")
@@ -353,13 +650,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         text = text.replace(f"@{bot_username}", "").strip()
 
-    # If message contains a month → generate monthly report
-    parsed = parse_month_input(text)
+    # If message looks like a report request → generate period report
+    parsed = parse_period_input(text)
     if parsed:
-        month, year = parsed
+        start, end = parsed
         await update.message.reply_text("⏳ Génération du rapport...")
         try:
-            report = generate_monthly_report(month, year)
+            report = generate_period_report(start, end)
             await update.message.reply_text(report, parse_mode="Markdown")
         except Exception as e:
             await update.message.reply_text(f"❌ Erreur: {str(e)}")
@@ -388,7 +685,7 @@ async def scheduled_monthly_report(context) -> None:
         month, year = today.month - 1, today.year
 
     try:
-        report = generate_monthly_report(month, year)
+        report = generate_period_report((year, month), (year, month))
         await context.bot.send_message(
             chat_id=COMPTA_GROUP_ID,
             message_thread_id=RAPPORTS_THREAD_ID,
