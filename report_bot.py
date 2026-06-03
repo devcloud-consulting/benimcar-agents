@@ -368,30 +368,18 @@ def monthrange_days(year: int, month: int) -> int:
 # ── Data Fetchers ─────────────────────────────────────────────────────────────
 
 def get_monthly_revenue(wb, month: int, year: int) -> dict:
-    """Get revenue from TOTAL Incomes sheet, fallback to Income sheet."""
-    ws = wb.worksheet("TOTAL Incomes")
-    rows = ws.get_all_values()
+    """Compute monthly revenue from the Income sheet, prorated by day.
 
-    for row in rows[1:]:
-        if not row or not row[0].strip():
-            continue
-        d = parse_date(row[0])
-        if d and d.month == month and d.year == year:
-            return {
-                "total_ventes": parse_amount(row[5]) if len(row) > 5 else 0.0,
-                "commissions": parse_amount(row[6]) if len(row) > 6 else 0.0,
-                "jours_location": int(row[2]) if len(row) > 2 and row[2].strip().isdigit() else 0,
-                "occupation": row[3].strip() if len(row) > 3 else "",
-                "moyenne_jour": row[4].strip() if len(row) > 4 else "",
-            }
+    A cross-month booking only contributes its in-month days × daily rate
+    to each month. The TOTAL Incomes sheet (manually maintained by the
+    accountant) is no longer used here because its monthly figures
+    attribute each booking entirely to its start month — that double-
+    counts revenue against the prorata model.
 
-    # Fallback: calculate from Income sheet, prorated by day so a
-    # multi-month booking only contributes the days that fall inside the
-    # requested month.
-    #
-    # Income columns: 0:ID, 1:Allez, 2:Retour, 3:Jours, 4:Prix(DH),
-    # 5:Voiture, 6:Vente(DH), 7:Currency, 8:Commissions, 9:Payé, ...
-    # Vente (DH) and Prix(DH) are both in dirhams.
+    Income columns: 0:ID, 1:Allez, 2:Retour, 3:Jours, 4:Prix(DH),
+    5:Voiture, 6:Vente(DH), 7:Currency, 8:Commissions, 9:Payé, ...
+    Vente(DH) and Prix(DH) are both in dirhams.
+    """
     income_ws = wb.worksheet("Income")
     income_rows = income_ws.get_all_values()
 
