@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import time as time_mod
+import asyncio
 from datetime import datetime, time as dtime, timedelta
 from calendar import monthrange
 from langchain_openai import ChatOpenAI
@@ -8,6 +10,32 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import gspread
 from google.oauth2.service_account import Credentials
+
+
+# ── Transient-failure retry for Google Sheets calls ─────────────────────────
+# Sheets/Drive occasionally return 503/502/429 during regional hiccups. Wrap
+# a closure with this helper and we'll retry up to 4 times with exponential
+# backoff before re-raising. Apply at handler boundaries to keep the user
+# from seeing raw stack traces on transient outages.
+def _sheets_retry(fn, *, retries=4, base_delay=2):
+    last = None
+    for attempt in range(retries):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as e:
+            msg = str(e)
+            transient = "[503]" in msg or "[502]" in msg or "[429]" in msg or "[500]" in msg
+            if not transient:
+                raise
+            last = e
+            time_mod.sleep(base_delay * (2 ** attempt))
+    raise last
+
+
+async def _sheets_retry_async(blocking_fn):
+    """Async wrapper for the sync retry above."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _sheets_retry(blocking_fn))
 
 BOT_TOKEN = "8664821276:AAH_riPofU3TtiAcoVlv5JKa_NRzUoPznaU"
 COMPTA_GROUP_ID = -1003956789017
@@ -621,8 +649,14 @@ async def rapport_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text("⏳ Génération du rapport...")
 
     try:
-        report = generate_period_report(start, end)
+        report = await _sheets_retry_async(lambda: generate_period_report(start, end))
         await update.message.reply_text(report, parse_mode="Markdown")
+    except gspread.exceptions.APIError as e:
+        msg = str(e)[:200]
+        await update.message.reply_text(
+            f"⚠️ Google Sheets indisponible (`{msg}`). Réessaie dans une minute.",
+            parse_mode="Markdown",
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {str(e)}")
 
@@ -654,8 +688,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         start, end = parsed
         await update.message.reply_text("⏳ Génération du rapport...")
         try:
-            report = generate_period_report(start, end)
+            report = await _sheets_retry_async(lambda: generate_period_report(start, end))
             await update.message.reply_text(report, parse_mode="Markdown")
+        except gspread.exceptions.APIError as e:
+            await update.message.reply_text(
+                f"⚠️ Google Sheets indisponible (`{str(e)[:200]}`). Réessaie dans une minute.",
+                parse_mode="Markdown",
+            )
         except Exception as e:
             await update.message.reply_text(f"❌ Erreur: {str(e)}")
         return
@@ -704,10 +743,8 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await update.message.reply_text("⏳ Synchronisation Firestore en cours...")
     try:
-        import asyncio
         from sync_firestore import sync_bookings
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, sync_bookings)
+        result = await _sheets_retry_async(sync_bookings)
         await update.message.reply_text(
             f"✅ *Synchronisation terminée*\n\n"
             f"📥 Added: *{result['added']}*\n"
@@ -715,6 +752,11 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"🗑️ Deleted (orphans): *{result.get('deleted', 0)}*\n"
             f"📊 Total Firestore: *{result['total_firestore']}*",
             parse_mode="Markdown"
+        )
+    except gspread.exceptions.APIError as e:
+        await update.message.reply_text(
+            f"⚠️ Google Sheets indisponible (`{str(e)[:200]}`). Réessaie dans une minute.",
+            parse_mode="Markdown",
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur sync: {str(e)}")
