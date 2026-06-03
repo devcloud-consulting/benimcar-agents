@@ -211,16 +211,21 @@ def compute_occupancy(wb, year: int, month: int, purchases) -> dict:
         if not s:
             continue
         e = parse_date(r[2])
-        eff = e if (e and e > s) else nms
+        try:
+            declared_days = int(r[3].strip()) if r[3].strip() else 0
+        except Exception:
+            declared_days = 0
+        derived_days = (e - s).days if (e and e > s) else 0
+        booking_total = declared_days or derived_days
+        # Effective end: start + booking_total (or month end for open bookings)
+        # so a sheet date span longer than declared Jours doesn't inflate
+        # occupancy.
+        eff = s + timedelta(days=booking_total) if booking_total > 0 else nms
         o_s = max(s, ms)
         o_e = min(eff, nms)
         od = (o_e - o_s).days
         if od <= 0:
             continue
-        try:
-            booking_total = int(r[3].strip())
-        except Exception:
-            booking_total = (eff - s).days
         factor = LONG_TERM_DISCOUNT_FACTOR if booking_total >= LONG_TERM_THRESHOLD_DAYS else 1.0
         car = (r[5] or "").strip()
         per_car_days[car] = per_car_days.get(car, 0) + od
@@ -398,18 +403,8 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
             continue
         end = parse_date(row[2])
 
-        # Open-ended bookings (no Retour yet): treat as ongoing through
-        # the end of the requested month so they contribute their days.
-        effective_end = end if (end and end > start) else next_month_start
-
-        overlap_start = max(start, month_start)
-        overlap_end = min(effective_end, next_month_start)
-        overlap_days = (overlap_end - overlap_start).days
-        if overlap_days <= 0:
-            continue
-
         # Booking total days: prefer the declared Jours column (col 3),
-        # fall back to (end - start).days when the dates are present.
+        # fall back to (Retour − Allez).days otherwise.
         try:
             declared_days = int(str(row[3]).strip()) if len(row) > 3 and str(row[3]).strip() else 0
         except ValueError:
@@ -417,10 +412,24 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
         derived_days = (end - start).days if (end and end > start) else 0
         booking_days = declared_days or derived_days
 
-        # Daily rate: prefer Vente(DH) / booking_days (matches how the
-        # row was priced). Only fall back to Prix(DH) if the division
-        # would be invalid (open booking with no declared Jours, or
-        # missing Vente).
+        # The effective end date for overlap purposes is `start + booking_days`,
+        # NOT the raw Retour. This keeps the sum of monthly contributions equal
+        # to Vente exactly, even when the sheet's Jours column is off by a day
+        # vs. (Retour − Allez).days. For open-ended bookings (no Retour AND no
+        # declared days) we treat them as ongoing through the requested month.
+        if booking_days > 0:
+            effective_end = start + timedelta(days=booking_days)
+        else:
+            effective_end = next_month_start
+
+        overlap_start = max(start, month_start)
+        overlap_end = min(effective_end, next_month_start)
+        overlap_days = (overlap_end - overlap_start).days
+        if overlap_days <= 0:
+            continue
+
+        # Daily rate: Vente(DH) / booking_days. Fall back to Prix(DH) when
+        # the division would be invalid (open booking, missing Vente).
         vente = parse_amount(row[6]) if len(row) > 6 else 0.0
         if booking_days > 0 and vente > 0:
             daily_rate = vente / booking_days
