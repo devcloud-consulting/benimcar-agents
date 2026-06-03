@@ -261,12 +261,13 @@ def compute_period_stats(wb, start: tuple[int, int], end: tuple[int, int]) -> di
         gen_exp = sum(get_monthly_general_expenses(wb, m, y).values())
         amort, _ = compute_amortization(purchases, y, m)
         occ = compute_occupancy(wb, y, m, purchases)
-        net_rev = rev["total_ventes"] - rev["commissions"]
+        # Commissions intentionally ignored: the accountant doesn't want
+        # them deducted from revenue in this view.
+        net_rev = rev["total_ventes"]
         benefit = net_rev - car_exp - gen_exp - amort
         rows.append({
             "year": y, "month": m,
             "revenue": rev["total_ventes"],
-            "commissions": rev["commissions"],
             "net_revenue": net_rev,
             "car_exp": car_exp,
             "general_exp": gen_exp,
@@ -282,7 +283,6 @@ def compute_period_stats(wb, start: tuple[int, int], end: tuple[int, int]) -> di
 
     totals = {
         "revenue": sum(r["revenue"] for r in rows),
-        "commissions": sum(r["commissions"] for r in rows),
         "net_revenue": sum(r["net_revenue"] for r in rows),
         "car_exp": sum(r["car_exp"] for r in rows),
         "general_exp": sum(r["general_exp"] for r in rows),
@@ -317,9 +317,6 @@ def generate_period_report(start: tuple[int, int], end: tuple[int, int]) -> str:
     lines = [header, ""]
     lines.append("💰 *Revenus*")
     lines.append(f"  Chiffre d'affaires : *{t['revenue']:,.0f} DH*")
-    if t["commissions"]:
-        lines.append(f"  Commissions        : −{t['commissions']:,.0f} DH")
-        lines.append(f"  Net revenus        : *{t['net_revenue']:,.0f} DH*")
     lines.append("")
     lines.append("💸 *Dépenses*")
     lines.append(f"  Voitures           : {t['car_exp']:,.0f} DH")
