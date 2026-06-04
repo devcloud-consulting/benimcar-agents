@@ -135,31 +135,46 @@ def parse_period_input(text: str) -> tuple[tuple[int, int], tuple[int, int]] | N
             start_dt = (start_dt - timedelta(days=1)).replace(day=1)
         return ((start_dt.year, start_dt.month), (end_y, end_m))
 
-    # Find ALL months mentioned, in order
-    months_found: list[tuple[int, int]] = []  # (position, month_num)
+    # Find ALL months and years with their positions in the text, then pair
+    # each month with the year that follows it (or with the only year, or
+    # default to the current year). This handles inputs like
+    #   "juin 2025 à mai 2026"   → ((2025, 6), (2026, 5))
+    #   "decembre 2025 mars 2026" → ((2025, 12), (2026, 3))
+    #   "juin à mai 2026"        → ((2025, 6), (2026, 5))  (year inferred)
+    month_positions = []  # [(pos, month_num)]
     for name, num in FRENCH_MONTHS.items():
         for m in re.finditer(rf"\b{name}\b", t):
-            months_found.append((m.start(), num))
-    months_found.sort()
-    if not months_found:
+            month_positions.append((m.start(), num))
+    month_positions.sort()
+    if not month_positions:
         return None
 
-    year_match = re.search(r"\b(202\d)\b", t)
-    year = int(year_match.group(1)) if year_match else datetime.now().year
+    year_positions = [(m.start(), int(m.group(1))) for m in re.finditer(r"\b(202\d)\b", t)]
+    default_year = datetime.now().year
 
-    if len(months_found) == 1:
-        m = months_found[0][1]
-        return ((year, m), (year, m))
+    def year_for(pos):
+        # First year mentioned AFTER this position (the year the user
+        # explicitly attached to that month name). Otherwise the last year
+        # mentioned in the text, otherwise current year.
+        for yp, yy in year_positions:
+            if yp > pos:
+                return yy
+        if year_positions:
+            return year_positions[-1][1]
+        return default_year
 
-    # Two or more months → first is start, last is end. If start > end (months
-    # span a year boundary like "decembre 2025 mars 2026") and an explicit year
-    # is given, assume the start belongs to the previous year.
-    start_m = months_found[0][1]
-    end_m = months_found[-1][1]
-    start_y = year
-    if start_m > end_m and year_match:
-        start_y = year - 1
-    return ((start_y, start_m), (year, end_m))
+    paired = [(year_for(pos), num) for pos, num in month_positions]
+
+    if len(paired) == 1:
+        return ((paired[0][0], paired[0][1]), (paired[0][0], paired[0][1]))
+
+    start_y, start_m = paired[0]
+    end_y, end_m = paired[-1]
+    # If user only mentioned one year but the range loops back ("juin à mai
+    # 2026"), assume the start belongs to the previous year.
+    if (start_y, start_m) > (end_y, end_m):
+        start_y = end_y - 1
+    return ((start_y, start_m), (end_y, end_m))
 
 
 def iter_months(start: tuple[int, int], end: tuple[int, int]):
@@ -572,13 +587,42 @@ def generate_monthly_report(month: int, year: int) -> str:
 def answer_question(question: str) -> str:
     wb = get_workbook()
 
-    total_rows = wb.worksheet("TOTAL Incomes").get_all_values()
+    # Build prorata-correct monthly summaries from Income (NOT from the
+    # manually-maintained TOTAL Incomes sheet, which attributed each booking
+    # to its start month entirely and inflated long-rental months). Cover
+    # every month from 2025-01 up to next month so DeepSeek can answer
+    # questions about any period without us going back to the wrong source.
+    today = datetime.now()
+    end_y = today.year + (1 if today.month == 12 else 0)
+    end_m = 1 if today.month == 12 else today.month + 1
+    summaries = []
+    purchases = get_vehicle_purchases(wb)
+    for y, m in iter_months((2025, 1), (end_y, end_m)):
+        rev = get_monthly_revenue(wb, m, y)
+        car_exp = sum(get_monthly_car_expenses(wb, m, y).values())
+        gen_exp = sum(get_monthly_general_expenses(wb, m, y).values())
+        amort, _ = compute_amortization(purchases, y, m)
+        net_rev = rev["total_ventes"] - rev["commissions"]
+        benefit = net_rev - car_exp - gen_exp - amort
+        summaries.append({
+            "mois": f"{MONTH_NAMES_FR[m]} {y}",
+            "revenus": round(rev["total_ventes"]),
+            "commissions": round(rev["commissions"]),
+            "net_revenus": round(net_rev),
+            "depenses_voitures": round(car_exp),
+            "depenses_generales": round(gen_exp),
+            "amortissement": round(amort),
+            "benefice_net": round(benefit),
+            "jours_loues": rev["jours_location"],
+        })
+
     car_rows = wb.worksheet("Dépenses Voitures").get_all_values()
     gen_rows = wb.worksheet("Dépense Général").get_all_values()
 
     context = f"""
-Résumés mensuels (TOTAL Incomes):
-{json.dumps(total_rows[:20], ensure_ascii=False)}
+Récapitulatif mensuel (calculé avec pro-rata journalier — chaque réservation
+contribue à chaque mois proportionnellement aux jours qui y tombent):
+{json.dumps(summaries, ensure_ascii=False)}
 
 Dépenses Voitures (hors Achat Voiture):
 {json.dumps([r for r in car_rows if len(r) > 1 and r[1] != 'Achat Voiture'], ensure_ascii=False)}
@@ -586,7 +630,8 @@ Dépenses Voitures (hors Achat Voiture):
 Dépenses Générales:
 {json.dumps(gen_rows, ensure_ascii=False)}
 
-Note: Les montants en euros sont convertis à 1 EUR = 10 MAD.
+Note: Les montants sont déjà en dirhams. L'amortissement est de 20% étalé
+sur 5 ans (60 mois), calculé à partir du prix d'achat de chaque véhicule.
 """
 
     prompt = f"""Tu es un assistant comptable pour BenimCar, une société de location de voitures à Agadir, Maroc.
