@@ -231,19 +231,12 @@ def compute_amortization(purchases, year: int, month: int) -> tuple[float, int]:
     return total, active
 
 
-def compute_occupancy(wb, year: int, month: int, purchases) -> dict:
-    """Compute raw + capped + weighted occupancy for one month.
-    Returns dict with raw_days, capped_days, weighted_days, capacity, suspects."""
+def _occupancy_from_rows(inc, year, month, purchases) -> dict:
+    """Same as compute_occupancy but takes pre-fetched Income rows."""
     from calendar import monthrange
     ms = datetime(year, month, 1)
     nd = monthrange(year, month)[1]
     nms = ms + timedelta(days=nd)
-
-    try:
-        inc = wb.worksheet("Income").get_all_values()
-    except gspread.WorksheetNotFound:
-        return {"raw_days": 0, "capped_days": 0, "weighted_days": 0.0,
-                "capacity": 0, "suspects": [], "n_cars": 0}
 
     per_car_days = {}
     per_car_weighted = {}
@@ -298,17 +291,58 @@ def compute_occupancy(wb, year: int, month: int, purchases) -> dict:
     }
 
 
+def compute_occupancy(wb, year: int, month: int, purchases) -> dict:
+    """Single-month convenience wrapper — reads Income on the fly."""
+    try:
+        inc = wb.worksheet("Income").get_all_values()
+    except gspread.WorksheetNotFound:
+        return {"raw_days": 0, "capped_days": 0, "weighted_days": 0.0,
+                "capacity": 0, "suspects": [], "n_cars": 0}
+    return _occupancy_from_rows(inc, year, month, purchases)
+
+
+def _expenses_from_rows(rows, year, month, exclude=None):
+    """Sum expenses in (year, month) from pre-fetched expense rows.
+    Returns dict of {category: amount} (matches get_monthly_*_expenses)."""
+    out = {}
+    for r in rows[1:]:
+        if len(r) < 4:
+            continue
+        d = parse_date(r[0])
+        if not d or d.year != year or d.month != month:
+            continue
+        cat = r[1].strip()
+        if exclude and cat == exclude:
+            continue
+        out[cat] = out.get(cat, 0.0) + parse_amount(r[3])
+    return out
+
+
 def compute_period_stats(wb, start: tuple[int, int], end: tuple[int, int]) -> dict:
     """Aggregates monthly stats over an inclusive (start_year, start_month) →
-    (end_year, end_month) range. Returns dict with totals + per-month rows."""
+    (end_year, end_month) range. Returns dict with totals + per-month rows.
+
+    Reads each Sheets tab ONCE (3 reads total: Income, Dépenses Voitures,
+    Dépense Général) regardless of period length, then filters in Python.
+    Prevents the Sheets per-minute quota from being hit on long periods."""
     purchases = get_vehicle_purchases(wb)
+    # Prefetch — these are the only Sheets reads in the whole computation.
+    income_rows = wb.worksheet("Income").get_all_values()
+    try:
+        car_exp_rows = wb.worksheet("Dépenses Voitures").get_all_values()
+    except gspread.WorksheetNotFound:
+        car_exp_rows = [[]]
+    try:
+        gen_exp_rows = wb.worksheet("Dépense Général").get_all_values()
+    except gspread.WorksheetNotFound:
+        gen_exp_rows = [[]]
     rows = []
     for y, m in iter_months(start, end):
-        rev = get_monthly_revenue(wb, m, y)
-        car_exp = sum(get_monthly_car_expenses(wb, m, y).values())
-        gen_exp = sum(get_monthly_general_expenses(wb, m, y).values())
+        rev = _monthly_revenue_from_rows(income_rows, y, m)
+        car_exp = sum(_expenses_from_rows(car_exp_rows, y, m, exclude="Achat Voiture").values())
+        gen_exp = sum(_expenses_from_rows(gen_exp_rows, y, m).values())
         amort, _ = compute_amortization(purchases, y, m)
-        occ = compute_occupancy(wb, y, m, purchases)
+        occ = _occupancy_from_rows(income_rows, y, m, purchases)
         net_rev = rev["total_ventes"] - rev["commissions"]
         benefit = net_rev - car_exp - gen_exp - amort
         rows.append({
@@ -415,22 +449,9 @@ def monthrange_days(year: int, month: int) -> int:
 
 # ── Data Fetchers ─────────────────────────────────────────────────────────────
 
-def get_monthly_revenue(wb, month: int, year: int) -> dict:
-    """Compute monthly revenue from the Income sheet, prorated by day.
-
-    A cross-month booking only contributes its in-month days × daily rate
-    to each month. The TOTAL Incomes sheet (manually maintained by the
-    accountant) is no longer used here because its monthly figures
-    attribute each booking entirely to its start month — that double-
-    counts revenue against the prorata model.
-
-    Income columns: 0:ID, 1:Allez, 2:Retour, 3:Jours, 4:Prix(DH),
-    5:Voiture, 6:Vente(DH), 7:Currency, 8:Commissions, 9:Payé, ...
-    Vente(DH) and Prix(DH) are both in dirhams.
-    """
-    income_ws = wb.worksheet("Income")
-    income_rows = income_ws.get_all_values()
-
+def _monthly_revenue_from_rows(income_rows, year, month) -> dict:
+    """Same as get_monthly_revenue but takes pre-fetched Income rows so
+    period reports can iterate many months without re-reading the sheet."""
     month_start = datetime(year, month, 1)
     next_month_start = month_start + timedelta(days=monthrange(year, month)[1])
 
@@ -492,39 +513,23 @@ def get_monthly_revenue(wb, month: int, year: int) -> dict:
         "moyenne_jour": "",
     }
 
+
+def get_monthly_revenue(wb, month: int, year: int) -> dict:
+    """Single-month convenience wrapper — reads the Income sheet on the fly.
+    Period reports go through compute_period_stats which prefetches once."""
+    income_rows = wb.worksheet("Income").get_all_values()
+    return _monthly_revenue_from_rows(income_rows, year, month)
+
 def get_monthly_car_expenses(wb, month: int, year: int) -> dict:
-    """Get car expenses grouped by category, excluding Achat Voiture."""
-    ws = wb.worksheet("Dépenses Voitures")
-    rows = ws.get_all_values()
-    expenses = {}
-    for row in rows[1:]:
-        if len(row) < 4:
-            continue
-        d = parse_date(row[0])
-        if not d or d.month != month or d.year != year:
-            continue
-        category = row[1].strip()
-        if category == "Achat Voiture":
-            continue
-        amount = parse_amount(row[3])
-        expenses[category] = expenses.get(category, 0.0) + amount
-    return expenses
+    """Single-month convenience wrapper. Period reports prefetch the sheet once."""
+    rows = wb.worksheet("Dépenses Voitures").get_all_values()
+    return _expenses_from_rows(rows, year, month, exclude="Achat Voiture")
+
 
 def get_monthly_general_expenses(wb, month: int, year: int) -> dict:
-    """Get general expenses grouped by category."""
-    ws = wb.worksheet("Dépense Général")
-    rows = ws.get_all_values()
-    expenses = {}
-    for row in rows[1:]:
-        if len(row) < 4:
-            continue
-        d = parse_date(row[0])
-        if not d or d.month != month or d.year != year:
-            continue
-        category = row[1].strip()
-        amount = parse_amount(row[3])
-        expenses[category] = expenses.get(category, 0.0) + amount
-    return expenses
+    """Single-month convenience wrapper. Period reports prefetch the sheet once."""
+    rows = wb.worksheet("Dépense Général").get_all_values()
+    return _expenses_from_rows(rows, year, month)
 
 # ── Report Generator ──────────────────────────────────────────────────────────
 
@@ -592,15 +597,20 @@ def answer_question(question: str) -> str:
     # to its start month entirely and inflated long-rental months). Cover
     # every month from 2025-01 up to next month so DeepSeek can answer
     # questions about any period without us going back to the wrong source.
+    # Prefetch each sheet ONCE so we don't burn through the per-minute quota.
     today = datetime.now()
     end_y = today.year + (1 if today.month == 12 else 0)
     end_m = 1 if today.month == 12 else today.month + 1
-    summaries = []
     purchases = get_vehicle_purchases(wb)
+    income_rows = wb.worksheet("Income").get_all_values()
+    car_rows = wb.worksheet("Dépenses Voitures").get_all_values()
+    gen_rows = wb.worksheet("Dépense Général").get_all_values()
+
+    summaries = []
     for y, m in iter_months((2025, 1), (end_y, end_m)):
-        rev = get_monthly_revenue(wb, m, y)
-        car_exp = sum(get_monthly_car_expenses(wb, m, y).values())
-        gen_exp = sum(get_monthly_general_expenses(wb, m, y).values())
+        rev = _monthly_revenue_from_rows(income_rows, y, m)
+        car_exp = sum(_expenses_from_rows(car_rows, y, m, exclude="Achat Voiture").values())
+        gen_exp = sum(_expenses_from_rows(gen_rows, y, m).values())
         amort, _ = compute_amortization(purchases, y, m)
         net_rev = rev["total_ventes"] - rev["commissions"]
         benefit = net_rev - car_exp - gen_exp - amort
@@ -615,9 +625,6 @@ def answer_question(question: str) -> str:
             "benefice_net": round(benefit),
             "jours_loues": rev["jours_location"],
         })
-
-    car_rows = wb.worksheet("Dépenses Voitures").get_all_values()
-    gen_rows = wb.worksheet("Dépense Général").get_all_values()
 
     context = f"""
 Récapitulatif mensuel (calculé avec pro-rata journalier — chaque réservation
