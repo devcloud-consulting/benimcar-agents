@@ -440,20 +440,27 @@ def _parse_date_custom(text: str) -> str:
 
 
 def _format_recap(p: dict) -> str:
+    """Return recap as HTML. Dynamic user values may contain characters
+    Telegram's legacy Markdown parser chokes on (`_`, `*`, `[`, `` ` ``);
+    HTML with escape on every dynamic field is safer and doesn't fail on
+    receipts whose OCR-extracted details include those chars."""
+    import html
+    def e(v):
+        return html.escape(str(v)) if v not in (None, "") else ""
     is_car = p.get("sheet_type") == "car"
     lines = [
-        "📋 *Récapitulatif:*",
+        "📋 <b>Récapitulatif:</b>",
         "",
-        f"📅 Date: {p.get('date') or 'N/A'}",
-        f"🏷️ Catégorie: {p.get('category') or 'N/A'}",
-        f"📝 Détails: {p.get('details') or '—'}",
-        f"💰 Montant: {p.get('amount') or 'N/A'} MAD",
+        f"📅 Date: {e(p.get('date')) or 'N/A'}",
+        f"🏷️ Catégorie: {e(p.get('category')) or 'N/A'}",
+        f"📝 Détails: {e(p.get('details')) or '—'}",
+        f"💰 Montant: {e(p.get('amount')) or 'N/A'} MAD",
     ]
     if is_car:
-        lines.append(f"🚗 Voiture: {p.get('car') or 'N/A'}")
-    lines.append(f"💳 Paiement: {p.get('payment_type') or 'N/A'}")
+        lines.append(f"🚗 Voiture: {e(p.get('car')) or 'N/A'}")
+    lines.append(f"💳 Paiement: {e(p.get('payment_type')) or 'N/A'}")
     if p.get("file_url"):
-        lines.append(f"📎 Justificatif: [Voir]({p['file_url']})")
+        lines.append(f'📎 Justificatif: <a href="{html.escape(p["file_url"], quote=True)}">Voir</a>')
     return "\n".join(lines)
 
 
@@ -509,7 +516,7 @@ async def _show_recap(send_func, pending: dict):
     await send_func(
         _format_recap(pending),
         reply_markup=kb_confirm(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
