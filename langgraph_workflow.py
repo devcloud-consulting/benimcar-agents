@@ -42,7 +42,7 @@ WORKERS_ALLOWED_CAR_CATEGORIES = [
 ]
 
 WORKERS_ALLOWED_GENERAL_CATEGORIES = [
-    "Lavage", "Fourniture", "Indrive/Taxi/Transport", "Panier Repas"
+    "Lavage", "Fourniture", "Indrive/Taxi/Transport", "Panier Repas", "Prestation"
 ]
 
 ALL_CATEGORIES = ALLOWED_CAR_CATEGORIES + ALLOWED_GENERAL_CATEGORIES
